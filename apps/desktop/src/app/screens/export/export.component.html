@@ -1,0 +1,103 @@
+<section class="page stack">
+  <div class="row row-between">
+    <div>
+      <h1>{{ 'export.title' | translate }}</h1>
+      <p class="muted">
+        @if (store.current(); as proj) {
+          {{ proj.name }}
+        }
+      </p>
+    </div>
+    <button
+      type="button"
+      class="btn"
+      (click)="openFolder()"
+      [disabled]="opening()"
+    >
+      {{ (opening() ? 'export.opening' : 'export.open-folder') | translate }}
+    </button>
+  </div>
+
+  <vd-error-banner [error]="error()" (dismiss)="dismissError()" />
+
+  <!-- Output summary -->
+  <div class="card stack">
+    <h2>{{ 'export.final-video' | translate }}</h2>
+    @if (outputPath(); as path) {
+      <p>
+        <span class="label">{{ 'export.output-label' | translate }}</span>
+        <span class="mono">{{ path }}</span>
+      </p>
+    } @else {
+      <p class="muted">{{ 'export.no-output' | translate }}</p>
+    }
+
+    @if (result(); as r) {
+      <p><span class="label">{{ 'export.duration-label' | translate }}</span> {{ formatDuration(r.durationMs) }}</p>
+      @if (r.sidecarSubtitlePaths.length) {
+        <div>
+          <span class="label">{{ 'export.sidecar-label' | translate }}</span>
+          <ul class="sidecar-list">
+            @for (sp of r.sidecarSubtitlePaths; track sp) {
+              <li class="mono">{{ sp }}</li>
+            }
+          </ul>
+        </div>
+      }
+    }
+
+    <!-- Best-effort preview -->
+    @if (previewUrl(); as url) {
+      @if (!previewFailed()) {
+        <video
+          class="video-preview"
+          controls
+          preload="metadata"
+          [src]="url"
+          (error)="onPreviewError()"
+        ></video>
+      } @else {
+        <div class="badge badge-pending preview-note">
+          {{ 'export.preview-unavailable' | translate }}
+        </div>
+      }
+    }
+  </div>
+
+  <!-- Re-render with a different subtitle mode -->
+  <div class="card stack">
+    <h2>{{ 'export.rerender-heading' | translate }}</h2>
+    <p class="muted">
+      {{ 'export.rerender-intro' | translate }}
+    </p>
+
+    <div class="field">
+      <label for="exportMode">{{ 'export.subtitle-mode' | translate }}</label>
+      <select
+        id="exportMode"
+        name="exportMode"
+        [ngModel]="chosenMode()"
+        (ngModelChange)="setMode($event)"
+      >
+        @for (mode of subtitleModes; track mode) {
+          <option [value]="mode">{{ subtitleLabels[mode] | translate }}</option>
+        }
+      </select>
+    </div>
+
+    <div class="row">
+      <button
+        type="button"
+        class="btn btn-primary"
+        (click)="rerender()"
+        [disabled]="rendering()"
+      >
+        {{ (rendering() ? 'export.rendering' : 'export.rerender') | translate }}
+      </button>
+      <vd-busy-indicator
+        [active]="rendering()"
+        [label]="'export.rendering-label' | translate"
+      />
+    </div>
+  </div>
+</section>

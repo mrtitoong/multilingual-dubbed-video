@@ -1,0 +1,585 @@
+<section class="page stack">
+  <header>
+    <h1>{{ 'settings.title' | translate }}</h1>
+    <p class="muted">{{ 'settings.subtitle' | translate }}</p>
+  </header>
+
+  <vd-error-banner [error]="error()" (dismiss)="dismissError()" />
+
+  <!-- ============================ This computer ============================ -->
+  @if (system(); as sys) {
+    <div class="card stack">
+      <h2>{{ 'settings.computer.heading' | translate }}</h2>
+      <div class="chips">
+        <span class="chip mono">{{ sys.profile.cpuModel }}</span>
+        <span class="chip">{{ 'settings.computer.cores' | translate: { n: sys.profile.cpuCores } }}</span>
+        <span class="chip">{{ ramLabel() }}</span>
+        @for (gpu of sys.profile.gpus; track gpu.name) {
+          <span class="chip">{{ gpu.name }}</span>
+        }
+        <span class="chip chip-tier">{{ sys.recommendation.tier }}</span>
+      </div>
+      <div class="stack-sm">
+        <p class="rec-line">
+          {{ 'settings.computer.rec-model' | translate }}
+          <strong class="mono">{{ sys.recommendation.whisperModel }}</strong>
+        </p>
+        @for (reason of sys.recommendation.reasons; track reason.key) {
+          <p class="hint">{{ reason.key | translate: reason.params }}</p>
+        }
+        @if (sys.recommendation.suggestCloud.stt || sys.recommendation.suggestCloud.translation) {
+          <p class="hint">
+            {{ 'settings.computer.cloud-suggest' | translate: { phases: cloudSuggestPhases() } }}
+          </p>
+        }
+      </div>
+      <!-- Simultaneous dubs: the machine-derived limit + a manual override. -->
+      <div class="stack-sm concurrency-row">
+        <label class="setting-row">
+          <span class="label">{{ 'settings.computer.concurrent' | translate }}</span>
+          <select
+            [ngModel]="concurrencyValue()"
+            (ngModelChange)="setConcurrency($event)"
+            [disabled]="prefSaving()"
+          >
+            <option value="auto">{{ 'settings.computer.auto' | translate: { n: sys.capacity.maxProjects } }}</option>
+            @for (n of concurrencyChoices; track n) {
+              <option [value]="n">{{ 'settings.computer.n-at-a-time' | translate: { n: n } }}</option>
+            }
+          </select>
+        </label>
+        <label class="setting-row">
+          <span class="label">{{ 'settings.computer.pause-queue' | translate }}</span>
+          <input
+            type="checkbox"
+            [ngModel]="queuePaused()"
+            (ngModelChange)="setQueuePaused($event)"
+            [disabled]="prefSaving()"
+          />
+        </label>
+        <details>
+          <summary class="hint">{{ 'settings.computer.why-limit' | translate }}</summary>
+          @for (reason of sys.capacity.reasons; track reason.key) {
+            <p class="hint">{{ reason.key | translate: reason.params }}</p>
+          }
+        </details>
+      </div>
+
+      <div class="actions">
+        <button type="button" class="btn" (click)="applyRecommended()" [disabled]="defaultsSaving()">
+          {{ 'settings.computer.use-recommended' | translate }}
+        </button>
+      </div>
+    </div>
+  }
+
+  <!-- ============================ Processing defaults ============================ -->
+  <div class="card stack">
+    <h2>{{ 'settings.defaults.heading' | translate }}</h2>
+    <p class="muted">
+      {{ 'settings.defaults.intro' | translate }}
+    </p>
+
+    @if (providers(); as provs) {
+      <div class="defaults-grid">
+        <div class="field">
+          <label for="defStt">{{ 'settings.defaults.stt' | translate }}</label>
+          <select
+            id="defStt"
+            name="defStt"
+            [ngModel]="defaults().sttProviderId ?? 'faster-whisper'"
+            (ngModelChange)="patchDefault('sttProviderId', $event)"
+          >
+            @for (p of selectable(provs.stt, defaults().sttProviderId ?? 'faster-whisper'); track p.id) {
+              <option [value]="p.id">
+                {{ p.displayName }}{{ p.available ? '' : ('settings.defaults.needs-key' | translate) }}
+              </option>
+            }
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="defSttModel">{{ 'settings.defaults.stt-model' | translate }}</label>
+          <select
+            id="defSttModel"
+            name="defSttModel"
+            [ngModel]="defaults().sttModel ?? 'base'"
+            (ngModelChange)="patchDefault('sttModel', $event)"
+          >
+            @for (m of whisperModels; track m.id) {
+              <option [value]="m.id">{{ m.label | translate }}</option>
+            }
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="defTranslation">{{ 'settings.defaults.translation' | translate }}</label>
+          <select
+            id="defTranslation"
+            name="defTranslation"
+            [ngModel]="defaults().translationProviderId ?? 'argos'"
+            (ngModelChange)="patchDefault('translationProviderId', $event)"
+          >
+            @for (p of selectable(provs.translation, defaults().translationProviderId ?? 'argos'); track p.id) {
+              <option [value]="p.id">
+                {{ p.displayName }}{{ p.available ? '' : ('settings.defaults.needs-key' | translate) }}
+              </option>
+            }
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="defTts">{{ 'settings.defaults.tts' | translate }}</label>
+          <select
+            id="defTts"
+            name="defTts"
+            [ngModel]="defaults().ttsProviderId ?? 'piper-local'"
+            (ngModelChange)="patchDefault('ttsProviderId', $event)"
+          >
+            @for (p of selectable(provs.tts, defaults().ttsProviderId ?? 'piper-local'); track p.id) {
+              <option [value]="p.id">
+                {{ p.displayName }}{{ p.available ? '' : ('settings.defaults.needs-key' | translate) }}
+              </option>
+            }
+          </select>
+        </div>
+
+        <div class="field">
+          <label>{{ 'settings.defaults.render' | translate }}</label>
+          <p class="static-value">{{ 'settings.defaults.render-value' | translate }}</p>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button type="button" class="btn btn-primary" (click)="saveDefaults()" [disabled]="defaultsSaving()">
+          {{ (defaultsSaving() ? 'settings.defaults.saving' : 'settings.defaults.save') | translate }}
+        </button>
+        @if (defaultsSaved()) {
+          <span class="badge badge-completed note">{{ 'settings.defaults.saved' | translate }}</span>
+        }
+      </div>
+    } @else {
+      <p class="hint">{{ 'settings.defaults.unavailable' | translate }}</p>
+    }
+  </div>
+
+  <!-- ============================ Cloud API keys ============================ -->
+  <div class="card stack">
+    <h2>{{ 'settings.keys.heading' | translate }}</h2>
+    <p class="muted">
+      {{ 'settings.keys.intro' | translate }}
+    </p>
+
+    @for (svc of services; track svc) {
+      <div class="cred-row stack-sm">
+        <div class="cred-head">
+          <span class="cred-name">{{ serviceMeta[svc].label }}</span>
+          @if (credentialFor(svc); as cred) {
+            @if (cred.configured) {
+              <span class="badge badge-completed">
+                {{ cred.fromEnv ? ('settings.keys.from-env' | translate) : ('settings.keys.key-set' | translate: { masked: cred.maskedKey ?? '' }) }}
+              </span>
+            } @else {
+              <span class="badge">{{ 'settings.keys.not-configured' | translate }}</span>
+            }
+          }
+        </div>
+        <div class="cred-controls">
+          <input
+            type="password"
+            class="grow"
+            [attr.aria-label]="'settings.keys.api-key-aria' | translate: { service: serviceMeta[svc].label }"
+            [placeholder]="serviceMeta[svc].keyHint | translate"
+            [ngModel]="keyInputFor(svc)"
+            (ngModelChange)="setKeyInput(svc, $event)"
+            [name]="'key-' + svc"
+            autocomplete="off"
+          />
+          <button
+            type="button"
+            class="btn btn-sm"
+            (click)="saveKey(svc)"
+            [disabled]="credBusy() !== null || keyInputFor(svc).trim().length === 0"
+          >
+            {{ 'settings.keys.save' | translate }}
+          </button>
+          <button
+            type="button"
+            class="btn btn-sm"
+            (click)="testKey(svc)"
+            [disabled]="credBusy() !== null || !(credentialFor(svc)?.configured ?? false)"
+          >
+            {{ credBusy() === svc ? '…' : ('settings.keys.test' | translate) }}
+          </button>
+          @if (credentialFor(svc)?.configured && !credentialFor(svc)?.fromEnv) {
+            <button
+              type="button"
+              class="btn btn-ghost btn-sm"
+              (click)="clearKey(svc)"
+              [disabled]="credBusy() !== null"
+            >
+              {{ 'settings.keys.remove' | translate }}
+            </button>
+          }
+        </div>
+        @if (testResults()[svc]; as result) {
+          <p class="hint" [class.test-ok]="result.ok" [class.test-fail]="!result.ok">
+            {{ result.ok ? '✓' : '✗' }} {{ result.detail }}
+          </p>
+        }
+      </div>
+    }
+  </div>
+
+  <!-- ============================ Engines ============================ -->
+  <div class="card stack">
+    <h2>{{ 'settings.engines.heading' | translate }}</h2>
+    <p class="muted">
+      {{ 'settings.engines.intro' | translate }}
+    </p>
+
+    @if (prerequisites(); as pre) {
+      @if (pre.uv.available) {
+        <p class="hint test-ok">
+          {{ 'settings.engines.uv-ok' | translate: { bundled: pre.uv.bundled ? ('settings.engines.uv-bundled' | translate) : '' } }}
+        </p>
+      } @else if (uvObtainable()) {
+        <p class="hint">
+          {{ 'settings.engines.uv-download' | translate }}
+        </p>
+      } @else {
+        <p class="hint test-fail">
+          {{ 'settings.engines.uv-missing' | translate }}
+        </p>
+      }
+    }
+
+    @if (enginePacks().length === 0) {
+      <p class="hint">{{ 'settings.engines.none' | translate }}</p>
+    }
+
+    @for (pack of enginePacks(); track pack.id) {
+      <div class="cred-row stack-sm">
+        <div class="cred-head">
+          <span class="cred-name">{{ pack.displayName }}</span>
+          @if (isEngineRecommended(pack.id)) {
+            <span class="badge badge-running">{{ 'settings.engines.recommended' | translate }}</span>
+          }
+          @if (isEngineInstalled(pack.id)) {
+            <span class="badge badge-completed">{{ 'settings.engines.installed' | translate }}</span>
+          }
+          @if (isEngineActive(pack)) {
+            <span class="badge badge-running" [title]="'settings.engines.in-use-title' | translate">{{ 'settings.engines.in-use' | translate }}</span>
+          }
+          @if (isEngineUpdatable(pack.id)) {
+            <span class="badge badge-running">{{ 'settings.engines.update-available' | translate }}</span>
+          }
+          <span class="chip">{{ pack.approxSizeMb >= 1000 ? (pack.approxSizeMb / 1000).toFixed(1) + ' GB' : pack.approxSizeMb + ' MB' }}</span>
+        </div>
+        <span class="hint">{{ pack.description }}</span>
+        @if (isEngineFit(pack.id)) {
+          <span class="hint test-ok">{{ 'settings.engines.fit-ok' | translate }}</span>
+        } @else {
+          <span class="hint test-fail">⚠ {{ engineFitHint(pack) }}</span>
+        }
+        @if (isEngineShadowed(pack)) {
+          <span class="hint">
+            {{ 'settings.engines.shadowed' | translate: { name: activePackName(pack) } }}
+            @if (activeSelectionNote(pack)) {
+              {{ activeSelectionNote(pack) }}
+            }
+            {{ 'settings.engines.shadowed-free' | translate }}
+          </span>
+        }
+        @if (pack.licenseNote) {
+          <span class="hint mono">{{ pack.licenseNote }}</span>
+        }
+        @if (engineProgressFor(pack.id); as prog) {
+          <div class="install-progress">
+            <span class="hint">{{ prog.message }}</span>
+            @if (prog.percent !== null) {
+              <progress [value]="prog.percent" max="100"></progress>
+            }
+          </div>
+        } @else {
+          <div class="cred-controls">
+            @if (isEngineInstalled(pack.id)) {
+              @if (isEngineUpdatable(pack.id)) {
+                <button type="button" class="btn btn-sm" (click)="installEngine(pack.id)" [title]="'settings.engines.update-title' | translate">{{ 'settings.engines.update' | translate }}</button>
+              } @else {
+                <button type="button" class="btn btn-ghost btn-sm" (click)="installEngine(pack.id)" [title]="'settings.engines.reinstall-title' | translate">{{ 'settings.engines.reinstall' | translate }}</button>
+              }
+              <button type="button" class="btn btn-ghost btn-sm" (click)="uninstallEngine(pack.id)">{{ 'settings.engines.remove' | translate }}</button>
+            } @else if (needsUv(pack) && prerequisites() && !prerequisites()!.uv.available && !uvObtainable()) {
+              <button type="button" class="btn btn-sm" disabled [title]="'settings.engines.needs-uv-title' | translate">
+                {{ 'settings.engines.install' | translate }}
+              </button>
+              <span class="hint test-fail">{{ 'settings.engines.needs-uv' | translate }}</span>
+            } @else {
+              <button type="button" class="btn btn-sm" (click)="installEngine(pack.id)">{{ 'settings.engines.install' | translate }}</button>
+            }
+          </div>
+        }
+      </div>
+    }
+  </div>
+
+  <!-- ===================== Translation packs (Argos) ===================== -->
+  <div class="card stack">
+    <h2>{{ 'settings.argos.heading' | translate }}</h2>
+    <p class="muted">
+      {{ 'settings.argos.intro' | translate }}
+    </p>
+
+    <div class="row argos-toolbar">
+      <button
+        type="button"
+        class="btn btn-sm"
+        (click)="loadArgosPackages(true)"
+        [disabled]="argosRefreshing()"
+      >
+        {{ (argosRefreshing() ? 'settings.argos.loading-index' : 'settings.argos.browse') | translate }}
+      </button>
+      @if (argosRows().length > 8) {
+        <input
+          type="search"
+          class="argos-filter"
+          [placeholder]="'settings.argos.filter' | translate"
+          [ngModel]="argosFilter()"
+          (ngModelChange)="argosFilter.set($event)"
+          [attr.aria-label]="'settings.argos.filter-aria' | translate"
+        />
+      }
+    </div>
+
+    @if (argosRows().length === 0) {
+      @if (argosRefreshing()) {
+        <p class="hint">{{ 'settings.argos.loading' | translate }}</p>
+      } @else {
+        <p class="hint">
+          {{ 'settings.argos.empty' | translate }}
+        </p>
+      }
+    }
+
+    @for (row of argosRows(); track row.key) {
+      <div class="cred-row stack-sm">
+        <div class="cred-head">
+          <span class="cred-name">{{ row.fromName }} → {{ row.toName }}</span>
+          <span class="chip mono">{{ row.from }}→{{ row.to }}</span>
+          @if (row.installed) {
+            <span class="badge badge-completed">{{ 'settings.argos.installed' | translate }}</span>
+          }
+        </div>
+        <div class="cred-controls">
+          @if (row.installed) {
+            <button
+              type="button"
+              class="btn btn-ghost btn-sm"
+              (click)="removeArgosPair(row)"
+              [disabled]="argosBusy() !== null"
+            >
+              {{ (argosBusy() === row.key ? 'settings.argos.removing' : 'settings.argos.remove') | translate }}
+            </button>
+          } @else {
+            <button
+              type="button"
+              class="btn btn-sm"
+              (click)="installArgosPair(row)"
+              [disabled]="argosBusy() !== null"
+            >
+              {{ (argosBusy() === row.key ? 'settings.argos.installing' : 'settings.argos.install') | translate }}
+            </button>
+            <vd-busy-indicator [active]="argosBusy() === row.key" [label]="'settings.argos.downloading' | translate" />
+          }
+        </div>
+      </div>
+    }
+  </div>
+
+  <!-- ============================ Language ============================ -->
+  <div class="card stack">
+    <h2>{{ 'settings.language.heading' | translate }}</h2>
+    <div class="setting-row">
+      <label class="switch-label" for="appLanguage">
+        <span class="switch-body">
+          <span class="switch-title">{{ 'settings.language.label' | translate }}</span>
+          <span class="hint">{{ 'settings.language.hint' | translate }}</span>
+        </span>
+      </label>
+      <select
+        id="appLanguage"
+        name="appLanguage"
+        [ngModel]="locale()"
+        (ngModelChange)="setLocale($event)"
+      >
+        @for (loc of supportedLocales; track loc) {
+          <option [value]="loc">{{ localeLabels[loc] }}</option>
+        }
+      </select>
+    </div>
+  </div>
+
+  <!-- ============================ Updates ============================ -->
+  <!-- ===================== Storage (free up disk space) ===================== -->
+  <div class="card stack">
+    <h2>{{ 'settings.storage.heading' | translate }}</h2>
+    <p class="muted">
+      {{ 'settings.storage.intro' | translate }}
+    </p>
+
+    @if (storage(); as s) {
+      <div class="cred-row stack-sm">
+        @for (loc of s.locations; track loc.key) {
+          <div class="setting-row">
+            <span class="cred-name">{{ 'storage-loc.' + loc.key | translate }}</span>
+            <span class="chip">{{ formatBytes(loc.bytes) }}</span>
+          </div>
+        }
+        <div class="setting-row">
+          <span class="cred-name"><strong>{{ 'settings.storage.total' | translate }}</strong></span>
+          <span class="chip">{{ formatBytes(s.totalBytes) }}</span>
+        </div>
+        @if (s.freeBytes !== null) {
+          <span class="hint">{{ 'settings.storage.free' | translate: { size: formatBytes(s.freeBytes) } }}</span>
+        }
+      </div>
+
+      @if (storageMessage(); as msg) {
+        <p class="hint test-ok">✓ {{ msg }}</p>
+      }
+
+      <div class="cred-controls">
+        <button type="button" class="btn btn-ghost btn-sm" (click)="openStorageFolder()">
+          {{ openFolderLabel() }}
+        </button>
+        <button
+          type="button"
+          class="btn btn-danger btn-sm"
+          (click)="clearStorage()"
+          [disabled]="storageClearing() || s.totalBytes === 0"
+        >
+          {{ (storageClearing() ? 'settings.storage.deleting' : 'settings.storage.delete') | translate }}
+        </button>
+        <vd-busy-indicator [active]="storageClearing()" [label]="'settings.storage.deleting-label' | translate" />
+      </div>
+    } @else if (storageLoading()) {
+      <p class="hint">{{ 'settings.storage.calculating' | translate }}</p>
+    } @else {
+      <p class="hint">{{ 'settings.storage.unavailable' | translate }}</p>
+    }
+  </div>
+
+  <div class="card stack">
+    <h2>{{ 'settings.updates.heading' | translate }}</h2>
+
+    <div class="version-row">
+      <span class="label">{{ 'settings.updates.current-version' | translate }}</span>
+      <span class="mono version-value">
+        @if (appVersion(); as v) {
+          {{ v }}
+        } @else {
+          —
+        }
+      </span>
+    </div>
+
+    @if (!inTauri) {
+      <div class="badge badge-warning note" role="status">
+        {{ 'settings.updates.browser-note' | translate }}
+      </div>
+    }
+
+    <div class="setting-row">
+      <label class="switch-label" for="autoUpdate">
+        <input
+          id="autoUpdate"
+          name="autoUpdate"
+          type="checkbox"
+          [ngModel]="autoUpdate()"
+          [disabled]="prefLoading() || prefSaving()"
+          (ngModelChange)="toggleAutoUpdate($event)"
+        />
+        <span class="switch-body">
+          <span class="switch-title">{{ 'settings.updates.auto-title' | translate }}</span>
+          <span class="hint">
+            {{ 'settings.updates.auto-hint' | translate }}
+          </span>
+        </span>
+      </label>
+      @if (prefSaving()) {
+        <span class="hint">{{ 'settings.updates.saving' | translate }}</span>
+      }
+    </div>
+
+    <div class="actions">
+      <button
+        type="button"
+        class="btn"
+        (click)="check()"
+        [disabled]="!inTauri || checkOutcome() === 'checking'"
+      >
+        {{ (checkOutcome() === 'checking' ? 'settings.updates.checking' : 'settings.updates.check') | translate }}
+      </button>
+
+      @if (updateAvailable()) {
+        <button
+          type="button"
+          class="btn btn-primary"
+          (click)="installUpdate()"
+          [disabled]="installing()"
+        >
+          {{ (installing() ? 'settings.updates.installing' : 'settings.updates.install') | translate }}
+        </button>
+        <vd-busy-indicator
+          [active]="installing()"
+          [label]="'settings.updates.installing-label' | translate"
+        />
+      }
+    </div>
+
+    <!-- Outcome / details -->
+    @switch (checkOutcome()) {
+      @case ('up-to-date') {
+        <div class="badge badge-completed note" role="status">
+          {{ 'settings.updates.up-to-date' | translate }}
+        </div>
+      }
+      @case ('available') {
+        @if (updateInfo(); as info) {
+          <div class="update-detail stack">
+            <div class="badge badge-running note">
+              {{ 'settings.updates.available' | translate: { version: info.version } }}
+            </div>
+            @if (info.date) {
+              <p class="hint">{{ 'settings.updates.released' | translate: { date: info.date } }}</p>
+            }
+            @if (info.notes) {
+              <div class="release-notes">
+                <h3>{{ 'settings.updates.notes' | translate }}</h3>
+                <pre class="notes-body">{{ info.notes }}</pre>
+              </div>
+            }
+            <div>
+              <button
+                type="button"
+                class="btn btn-ghost btn-sm"
+                (click)="openReleaseNotes()"
+              >
+                {{ 'settings.updates.view-github' | translate }}
+              </button>
+            </div>
+          </div>
+        }
+      }
+    }
+  </div>
+
+  <!-- ============================ About ============================ -->
+  <div class="card stack">
+    <h2>{{ 'settings.about.heading' | translate }}</h2>
+    <p class="muted">
+      {{ 'settings.about.body' | translate }}
+    </p>
+  </div>
+</section>

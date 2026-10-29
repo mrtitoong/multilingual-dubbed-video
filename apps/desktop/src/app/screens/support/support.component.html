@@ -1,0 +1,83 @@
+<section class="page stack">
+  <header>
+    <h1>{{ 'support.title' | translate }}</h1>
+    <p class="muted">
+      {{ 'support.intro' | translate }}
+    </p>
+  </header>
+
+  <!-- Online sponsorship: removed with the previous maintainer's accounts. To
+       restore, add a card with buttons calling open('<your sponsor URL>'); the
+       support.sponsor-* / support.github / support.coffee strings remain. -->
+
+  <!-- Direct bank transfer (Vietnam) -->
+  <div class="card stack">
+    <h2>{{ 'support.bank-heading' | translate }}</h2>
+    <p class="hint">
+      {{ 'support.bank-hint' | translate }}
+    </p>
+
+    <div class="bank">
+      <img
+        class="qr"
+        src="assets/qr_vpbank.png"
+        [alt]="'support.qr-alt' | translate"
+        width="220"
+        height="220"
+      />
+
+      <dl class="bank-details">
+        <div class="bank-row">
+          <dt>{{ 'support.beneficiary' | translate }}</dt>
+          <dd>
+            <span>HOANG DUY KHANH</span>
+            <button
+              type="button"
+              class="btn btn-ghost btn-sm"
+              (click)="copy('HOANG DUY KHANH', 'name')"
+            >
+              {{ (copied() === 'name' ? 'support.copied' : 'support.copy') | translate }}
+            </button>
+          </dd>
+        </div>
+
+        <div class="bank-row">
+          <dt>{{ 'support.account-number' | translate }}</dt>
+          <dd>
+            <span class="mono">184268183</span>
+            <button
+              type="button"
+              class="btn btn-ghost btn-sm"
+              (click)="copy('184268183', 'account')"
+            >
+              {{ (copied() === 'account' ? 'support.copied' : 'support.copy') | translate }}
+            </button>
+          </dd>
+        </div>
+
+        <div class="bank-row">
+          <dt>{{ 'support.bank' | translate }}</dt>
+          <dd>{{ 'support.bank-name' | translate }}</dd>
+        </div>
+
+        <div class="bank-row">
+          <dt>{{ 'support.swift' | translate }}</dt>
+          <dd>
+            <span class="mono">VPBKVNVX</span>
+            <button
+              type="button"
+              class="btn btn-ghost btn-sm"
+              (click)="copy('VPBKVNVX', 'swift')"
+            >
+              {{ (copied() === 'swift' ? 'support.copied' : 'support.copy') | translate }}
+            </button>
+          </dd>
+        </div>
+      </dl>
+    </div>
+
+    <p class="hint">
+      {{ 'support.swift-hint' | translate }}
+    </p>
+  </div>
+</section>

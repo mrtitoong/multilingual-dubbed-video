@@ -1,0 +1,39 @@
+[project]
+name = "vd-omnivoice"
+version = "0.2.0"
+description = "VideoDubber OmniVoice (k2-fsa) multilingual neural-TTS engine for the optional tts-omnivoice engine pack (Apple Silicon / PyTorch MPS)"
+requires-python = ">=3.10"
+# Runtime deps are provided by the engine pack's uv venv (see the orchestrator's
+# uvRequirements['tts-omnivoice']); this package is loaded from bundled source via
+# PYTHONPATH, not pip-installed. Listed here for reference / standalone dev only.
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn>=0.29",
+]
+
+[project.optional-dependencies]
+# The OmniVoice stack — installed into the pack venv at install time, NOT here.
+# The official `omnivoice` package runs the full PyTorch model (the HF Space
+# pipeline) on the Apple-Silicon Metal (MPS) backend — the MLX ports degrade the
+# audio codec — so this pack is gated to darwin/arm64. omnivoice pulls transformers
+# + accelerate; torch/torchaudio are listed explicitly to pin the MPS build.
+omnivoice = [
+  # torch floor raised from >=2.4: GHSA-rrmf-rvhw-rf47 affects everything below
+  # 2.13.0, and >=2.4 admitted torch 2.4.0 (23 OSV advisories). The pack venv's
+  # real pin lives in the orchestrator's uvRequirements.ts; this mirrors it.
+  "torch>=2.13",
+  "torchaudio>=2.13",
+  "omnivoice>=0.1.5",
+]
+dev = [
+  "pytest>=8.0",
+  "httpx>=0.27",
+  "numpy>=1.26",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["vd_omnivoice"]

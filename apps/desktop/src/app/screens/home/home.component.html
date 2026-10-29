@@ -1,0 +1,107 @@
+<section class="page stack">
+  <div class="row row-between">
+    <div>
+      <h1>{{ 'home.title' | translate }}</h1>
+      <p class="muted">{{ 'home.subtitle' | translate }}</p>
+    </div>
+    <div class="row">
+      <button
+        type="button"
+        class="btn"
+        (click)="refresh()"
+        [disabled]="store.loading()"
+      >
+        {{ 'common.refresh' | translate }}
+      </button>
+      <button type="button" class="btn btn-primary" (click)="newProject()">
+        {{ 'home.new-project' | translate }}
+      </button>
+    </div>
+  </div>
+
+  <vd-error-banner
+    [error]="store.lastError()"
+    (dismiss)="store.clearError()"
+  />
+
+  <!-- Standing reminder for anyone who skipped the first-run download. Not
+       dismissible: it IS the state of the install, and it clears itself as soon
+       as a model is on disk. -->
+  @if (modelsMissing()) {
+    <div class="card models-missing" role="status">
+      <strong>{{ 'home.models-missing-title' | translate }}</strong>
+      <p class="hint">{{ 'home.models-missing-body' | translate }}</p>
+      <a routerLink="/settings" class="btn btn-sm">{{ 'home.models-missing-cta' | translate }}</a>
+    </div>
+  }
+
+  <!-- Capacity summary: only surfaces once dubbing is actually happening, so
+       the limit is explained at the first moment it costs the user something. -->
+  @if (queue(); as q) {
+    @if (q.running.length > 0 || q.entries.length > 0) {
+      <div class="card stack-sm queue-summary">
+        <div class="row row-between">
+          <strong>{{ 'home.now-dubbing' | translate }}</strong>
+          <a routerLink="/settings" class="hint"
+            >{{ 'home.queue-link' | translate: { running: q.running.length, max: q.maxProjects } }}</a
+          >
+        </div>
+        @for (r of q.running; track r.projectId) {
+          <p class="hint">▶ {{ r.name }}{{ r.heavy ? ('home.heavy-suffix' | translate) : '' }}</p>
+        }
+        @if (q.entries.length > 0) {
+          <strong class="up-next">{{ 'home.up-next' | translate }}</strong>
+          @for (e of q.entries; track e.projectId) {
+            <p class="hint">{{ 'home.queue-entry' | translate: { position: e.position, name: e.name, message: e.message } }}</p>
+          }
+        }
+        @if (q.paused) {
+          <p class="hint">{{ 'home.queue-paused' | translate }}</p>
+        }
+      </div>
+    }
+  }
+
+  @if (store.loading() && store.recentProjects().length === 0) {
+    <div class="card muted">{{ 'home.loading' | translate }}</div>
+  } @else if (store.recentProjects().length === 0) {
+    <div class="card empty-state stack">
+      <h2>{{ 'home.empty-title' | translate }}</h2>
+      <p class="muted">
+        {{ 'home.empty-body' | translate }}
+      </p>
+      <div>
+        <button type="button" class="btn btn-primary" (click)="newProject()">
+          {{ 'home.create-first' | translate }}
+        </button>
+      </div>
+    </div>
+  } @else {
+    <ul class="project-list" role="list">
+      @for (project of store.recentProjects(); track project.id) {
+        <li class="project-card">
+          <button
+            type="button"
+            class="project-open"
+            (click)="open(project)"
+            [attr.aria-label]="'home.open-aria' | translate: { name: project.name }"
+          >
+            <div class="project-main">
+              <span class="project-name">{{ project.name }}</span>
+              <span class="project-path mono">{{ project.inputVideoPath }}</span>
+            </div>
+            <div class="project-meta">
+              <span class="badge badge-pending">{{ dubLabel(project) }}</span>
+              @if (project.mediaInfo) {
+                <span class="muted">{{
+                  formatDuration(project.mediaInfo.durationMs)
+                }}</span>
+              }
+              <vd-status-badge [status]="badgeStatus(project)" />
+            </div>
+          </button>
+        </li>
+      }
+    </ul>
+  }
+</section>

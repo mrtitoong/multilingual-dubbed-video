@@ -1,0 +1,319 @@
+# VideoDubber — Release workflow
+# ==============================================================================
+# Builds the fully self-contained desktop installers (.dmg/.app, .msi/.exe,
+# .deb/AppImage), bundling the Node orchestrator + the 3 Python workers
+# (PyInstaller) + libass-enabled ffmpeg/ffprobe as Tauri externalBin sidecars,
+# code-signs them, and publishes a DRAFT GitHub Release with the auto-updater
+# manifest (latest.json).
+#
+# Trigger: push a tag like `v0.2.0` (see docs/RELEASING.md). Manual re-runs are
+# possible via workflow_dispatch.
+#
+# ------------------------------------------------------------------------------
+# REQUIRED GitHub SECRETS (Settings -> Secrets and variables -> Actions)
+# ------------------------------------------------------------------------------
+# Tauri auto-updater signing (only when auto-update is enabled — see RELEASING.md):
+#   TAURI_SIGNING_PRIVATE_KEY            Contents of the generated ~/.tauri/<name>.key
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD   Password for that key. The committed key has
+#                                        an EMPTY password; GitHub can't store an empty
+#                                        secret, so hardcode `: ''` below instead.
+#   -> The matching PUBLIC key goes in tauri.conf.json plugins.updater.pubkey.
+#
+# macOS code signing + notarization (REQUIRED for a distributable .dmg):
+#   APPLE_CERTIFICATE                    base64 of your Developer ID Application .p12
+#   APPLE_CERTIFICATE_PASSWORD           password for that .p12
+#   APPLE_SIGNING_IDENTITY               e.g. "Developer ID Application: Your Name (TEAMID)"
+#   APPLE_ID                             Apple ID email used for notarization
+#   APPLE_PASSWORD                       app-specific password for that Apple ID
+#   APPLE_TEAM_ID                        your 10-char Apple Team ID
+#   KEYCHAIN_PASSWORD                    any throwaway password for the temp keychain
+#
+# Windows Authenticode signing (OPTIONAL but recommended — avoids SmartScreen):
+#   WINDOWS_CERTIFICATE                  base64 of your code-signing .pfx
+#   WINDOWS_CERTIFICATE_PASSWORD         password for that .pfx
+#   (If unset, the build still produces UNSIGNED installers.)
+#
+# GITHUB_TOKEN is provided automatically; the workflow needs `contents: write`.
+# ==============================================================================
+
+name: Release
+
+on:
+  # The pipeline is kept INTACT but gated PER-OS, so each platform can be built
+  # LOCALLY (scripts/package/*) or in CI independently. A `v*` tag push triggers
+  # this workflow; the `setup` job resolves which OSes actually build from per-OS
+  # repo variables (Settings → Secrets and variables → Actions → Variables), so a
+  # disabled OS provisions NO runner (10x-billed macOS minutes stay unspent). A
+  # manual `workflow_dispatch` run builds everything. Every OS defaults to a
+  # LOCAL build (CI is opt-in per OS); set a variable to "true" to build that OS
+  # in CI:
+  #   RELEASE_CI_MACOS    default false → macOS built locally
+  #   RELEASE_CI_WINDOWS  default false → Windows built locally
+  #   RELEASE_CI_LINUX    default false → Linux built locally
+  # Local-release runbook + how to toggle: docs/RELEASING.md.
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag/version to build (e.g. v0.2.0). Used only for manual runs."
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  # Resolve which OSes build in CI from the per-OS RELEASE_CI_* flags (see the
+  # `on:` note). A tiny ubuntu job so a disabled OS never reaches the build
+  # matrix and provisions no runner. `scripts/ci/resolve-release-matrix.py`
+  # owns the entries + the default policy and is unit-runnable locally.
+  setup:
+    name: Resolve CI build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+      any: ${{ steps.m.outputs.any }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: m
+        shell: bash
+        env:
+          MANUAL: ${{ github.event_name == 'workflow_dispatch' }}
+          CI_MACOS: ${{ vars.RELEASE_CI_MACOS }}
+          CI_WINDOWS: ${{ vars.RELEASE_CI_WINDOWS }}
+          CI_LINUX: ${{ vars.RELEASE_CI_LINUX }}
+        run: python3 scripts/ci/resolve-release-matrix.py >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: setup
+    # Skipped (no runners) when every OS is built locally; the matrix is whatever
+    # `setup` selected.
+    if: ${{ needs.setup.outputs.any == 'true' }}
+    name: Build (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+
+    runs-on: ${{ matrix.os }}
+
+    # Job-level env so step `if:` conditions can test whether optional signing
+    # secrets are set (secrets cannot be referenced directly in `if:`).
+    env:
+      HAS_APPLE_CERT: ${{ secrets.APPLE_CERTIFICATE != '' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # --- Toolchains -------------------------------------------------------
+      - name: Setup Node 24 + corepack/pnpm
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Enable corepack (pnpm)
+        run: corepack enable
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Rust (stable, ${{ matrix.rust-target }})
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - name: Cache cargo registry + target
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+
+      # --- Linux: Tauri system dependencies --------------------------------
+      # WebKitGTK, libsoup, ayatana appindicator, librsvg, plus 7z for ffmpeg
+      # extraction (not needed on Linux but harmless), and patchelf for AppImage.
+      # Match on the OS family, not an exact image name: the previous
+      # `matrix.os == 'ubuntu-22.04'` silently stopped installing the Tauri system
+      # deps the moment the runner pin moved, and `tauri build` would then fail
+      # deep in the build with a missing-webkit2gtk link error.
+      - name: Install Tauri system deps (Linux)
+        if: startsWith(matrix.os, 'ubuntu-')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            xz-utils \
+            file
+
+      # --- JS deps ----------------------------------------------------------
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      # --- Python worker venvs ---------------------------------------------
+      # Nothing to do here any more. build-workers.{sh,ps1} create their OWN
+      # throwaway venv per worker from the standalone CPython that fetch-python
+      # stages, install that worker's requirements.txt plus the pinned freezer
+      # from scripts/package/build-requirements.txt, and freeze from there.
+      #
+      # This step used to `python -m venv` each worker with the runner's ambient
+      # interpreter and `pip install pyinstaller` unpinned — which meant CI and a
+      # local release build produced materially different binaries from the same
+      # commit, and CI could not catch the macOS deployment-target bug at all
+      # because it happened to run on an older image than the maintainer's Mac.
+
+      # --- Build ALL sidecars (orchestrator + workers + ffmpeg) ------------
+      - name: Build sidecars (POSIX)
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        env:
+          TARGET_TRIPLE: ${{ matrix.rust-target }}
+          # Authenticate fetch-ffmpeg's BtbN release API lookup (avoids the 60/hr
+          # unauthenticated rate limit on shared CI runner IPs).
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # No .env on CI, so fetch-ffmpeg downloads a STATIC, libass-enabled,
+          # portable ffmpeg (macOS: Martin-Riedl; Linux: BtbN dated autobuild) —
+          # the resulting installers are fully self-contained.
+          bash scripts/package/build-sidecars.sh
+
+      - name: Build sidecars (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        env:
+          TARGET_TRIPLE: ${{ matrix.rust-target }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pwsh scripts/package/build-sidecars.ps1 -TargetTriple $env:TARGET_TRIPLE
+
+      # --- macOS signing keychain setup ------------------------------------
+      # Import the Developer ID cert into a temporary keychain so codesign can
+      # find it. tauri-action uses APPLE_SIGNING_IDENTITY for the actual signing.
+      - name: Import Apple code-signing certificate (macOS)
+        if: startsWith(matrix.os, 'macos') && env.HAS_APPLE_CERT == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN=build.keychain
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security default-keychain -s "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -t 3600 -u "$KEYCHAIN"
+          echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
+          security import certificate.p12 -k "$KEYCHAIN" -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/productsign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          rm -f certificate.p12
+
+      # Provide the Apple signing vars to tauri-action ONLY when a certificate is
+      # actually configured. If they are passed unconditionally (e.g. APPLE_CERTIFICATE:
+      # ${{ secrets.APPLE_CERTIFICATE }} with the secret unset), GitHub exports them as
+      # present-but-EMPTY strings, and Tauri's macOS bundler then treats APPLE_CERTIFICATE
+      # as "present" and tries to `security import` an empty cert -> it dies with
+      # "SecKeychainItemImport: ... parameters ... not valid". Writing them to $GITHUB_ENV
+      # behind the HAS_APPLE_CERT gate keeps them genuinely ABSENT for unsigned builds, so
+      # macOS produces an unsigned .app/.dmg (the release notes already tell users to
+      # right-click -> Open). Windows tolerates an empty cert, so it stays inline below.
+      # SIGN-ONLY handoff to tauri-action: we pass the certificate vars but
+      # deliberately WITHHOLD APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID, so Tauri
+      # signs the .app but does NOT notarize. We notarize ourselves afterwards (in
+      # "Sign + notarize (macOS)") because Tauri's resource copy dereferences the
+      # symlinks in PyInstaller's bundled Python.framework, mangling it — that has
+      # to be repaired in the built .app before notarization. See docs/APPLE_SIGNING.md.
+      - name: Provide Apple signing env (sign-only; we notarize separately)
+        if: startsWith(matrix.os, 'macos') && env.HAS_APPLE_CERT == 'true'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          {
+            echo "APPLE_CERTIFICATE<<__VD_CERT_EOF__"
+            echo "$APPLE_CERTIFICATE"
+            echo "__VD_CERT_EOF__"
+            echo "APPLE_CERTIFICATE_PASSWORD=$APPLE_CERTIFICATE_PASSWORD"
+            echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY"
+          } >> "$GITHUB_ENV"
+
+      # --- Build + publish the Tauri app (draft Release) -------------------
+      # tauri-action runs `tauri build`, signs (only if the Apple env above was
+      # provided), and uploads the bundles. Apple vars are intentionally NOT listed
+      # here — they arrive via $GITHUB_ENV only when a cert exists (see above).
+      - name: Build & release (tauri-action)
+        id: tauri
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Updater signing (auto-update enabled in v0.2.0). The committed
+          # videodubber.key has an EMPTY password, and GitHub can't store an empty
+          # secret, so the password is hardcoded to '' (see docs/RELEASING.md).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+          # Windows Authenticode (optional; Windows tolerates an empty cert).
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        with:
+          # The Tauri project lives in apps/desktop; tauri-action runs the
+          # beforeBuildCommand (Angular build) from there per tauri.conf.json.
+          projectPath: apps/desktop
+          # Use the pushed tag (refs/tags/vX) or the manual input.
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || (github.event.inputs.tag || 'v__VERSION__') }}
+          releaseName: "VideoDubber ${{ github.ref_type == 'tag' && github.ref_name || github.event.inputs.tag }}"
+          releaseBody: |
+            See the assets below to download and install VideoDubber for your OS.
+            First launch downloads the AI models via the in-app setup wizard.
+
+            macOS: the .dmg is Apple Developer-ID signed + notarized — just
+            double-click to open. Windows: SmartScreen → More info → Run anyway
+            (Windows code-signing is a later addition).
+          # Keep as DRAFT so a human reviews + publishes (see docs/RELEASING.md).
+          releaseDraft: true
+          prerelease: false
+          # Auto-update is enabled in v0.2.0: createUpdaterArtifacts is true in
+          # tauri.conf.json and the TAURI_SIGNING_PRIVATE_KEY secret is set, so
+          # tauri-action emits the signed update archives + latest.json.
+          includeUpdaterJson: true
+          args: ${{ matrix.tauri-args }}
+
+      # Repair the bundled PyInstaller frameworks in the built .app (Tauri's
+      # resource copy dereferences their symlinks, which mangles them), re-sign +
+      # re-seal the app, rebuild the .dmg, then notarize + staple + replace the
+      # release's .dmg. Runs INSTEAD of tauri-action's own notarization (we
+      # withheld the notary vars above). See docs/APPLE_SIGNING.md.
+      - name: Sign + notarize (macOS)
+        if: startsWith(matrix.os, 'macos') && env.HAS_APPLE_CERT == 'true'
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          ENTITLEMENTS: apps/desktop/src-tauri/entitlements.plist
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_ID: ${{ steps.tauri.outputs.releaseId }}
+        run: bash scripts/package/macos-sign-notarize.sh
+
+      # Drop the "Open Me First" macOS unlock steps INTO the built .dmg so the
+      # first-launch instructions ship with the download (release notes are easy
+      # to miss). SKIPPED when the build is notarized (HAS_APPLE_CERT): a notarized
+      # .dmg needs no unlock, and editing it would break the staple. Best-effort:
+      # the script restores the original installer on any failure.
+      - name: Add first-launch instructions to the .dmg (macOS)
+        if: runner.os == 'macOS' && env.HAS_APPLE_CERT != 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_ID: ${{ steps.tauri.outputs.releaseId }}
+        run: |
+          dmgs=$(find apps/desktop/src-tauri/target -path '*/release/bundle/dmg/*.dmg' 2>/dev/null || true)
+          if [ -z "$dmgs" ]; then echo "no .dmg found; skipping"; exit 0; fi
+          bash scripts/package/dmg-add-instructions.sh $dmgs

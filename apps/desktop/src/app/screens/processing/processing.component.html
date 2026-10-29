@@ -1,0 +1,171 @@
+<section class="page stack">
+  <div class="row row-between">
+    <div>
+      <h1>{{ 'processing.title' | translate }}</h1>
+      <p class="muted">
+        @if (store.current(); as proj) {
+          {{ proj.name }} ·
+          <span class="mono"
+            >{{ proj.settings.sourceLanguage }} →
+            {{ proj.settings.targetLanguage }}</span
+          >
+        }
+      </p>
+    </div>
+    <div class="row">
+      <vd-status-badge [status]="overallStatus()" />
+      @if (events.status() === 'error') {
+        <span class="badge badge-warning" [title]="'processing.stream-offline-title' | translate"
+          >{{ 'processing.stream-offline' | translate }}</span
+        >
+      }
+    </div>
+  </div>
+
+  <vd-error-banner [error]="displayError()" (dismiss)="dismissError()" />
+
+  <!-- Waiting for a free dubbing slot: this project is queued behind others. -->
+  @if (queueEntry(); as entry) {
+    <div class="card banner-info stack" role="status">
+      <strong>{{ 'processing.queued-title' | translate: { position: entry.position } }}</strong>
+      <p class="muted">{{ entry.message }}</p>
+      @if (queue(); as q) {
+        <p class="hint">
+          {{ 'processing.queue-capacity' | translate: { max: q.maxProjects } }}
+          @if (q.running.length > 0) {
+            {{ 'processing.queue-now' | translate: { names: runningNames() } }}
+          }
+        </p>
+      }
+      <div class="row">
+        <button type="button" class="btn" (click)="runNext()">{{ 'processing.run-next' | translate }}</button>
+        <button type="button" class="btn btn-danger" (click)="cancel()" [disabled]="cancelling()">
+          {{ (cancelling() ? 'processing.removing' : 'processing.remove-from-queue') | translate }}
+        </button>
+      </div>
+    </div>
+  }
+
+  <!-- Transcript-review checkpoint: the run paused after translation so the
+       user can adjust the segments before any voice is synthesized. -->
+  @if (awaitingReview()) {
+    <div class="card banner-info stack" role="status">
+      <strong>{{ 'processing.review-title' | translate }}</strong>
+      <p class="muted">
+        {{ 'processing.review-body' | translate }}
+      </p>
+      <div class="row">
+        <button type="button" class="btn btn-primary" (click)="goToEditor()">
+          {{ 'processing.review-edit' | translate }}
+        </button>
+        <button type="button" class="btn" (click)="continueDubbing()" [disabled]="continuing()">
+          {{ (continuing() ? 'processing.continuing' : 'processing.continue-dubbing') | translate }}
+        </button>
+      </div>
+    </div>
+  }
+
+  <!-- Live service-health: warn if a required bundled service drops mid-run. -->
+  @if (degradedServices().length > 0) {
+    <div class="card banner-warning" role="alert">
+      {{ 'processing.degraded' | translate: { services: degradedServices().join(', ') } }}
+    </div>
+  }
+
+  <!-- Overall progress -->
+  <div class="card stack">
+    <div class="row row-between">
+      <strong>{{ 'processing.overall' | translate }}</strong>
+      <span class="mono">{{ overallPercent() }}%</span>
+    </div>
+    <div
+      class="progress"
+      role="progressbar"
+      [attr.aria-label]="'processing.overall-aria' | translate"
+      [attr.aria-valuenow]="overallPercent()"
+      aria-valuemin="0"
+      aria-valuemax="100"
+    >
+      <span [style.width.%]="overallPercent()"></span>
+    </div>
+
+    <div class="row">
+      @if (isRunning()) {
+        <button
+          type="button"
+          class="btn btn-danger"
+          (click)="cancel()"
+          [disabled]="cancelling()"
+        >
+          {{ (cancelling() ? 'processing.cancelling' : 'processing.cancel') | translate }}
+        </button>
+      }
+      @if (isComplete()) {
+        <button type="button" class="btn btn-primary" (click)="goToEditor()">
+          {{ 'processing.open-editor' | translate }}
+        </button>
+        <button type="button" class="btn" (click)="goToExport()">{{ 'processing.go-export' | translate }}</button>
+      }
+    </div>
+  </div>
+
+  <!-- Step list -->
+  <ol class="step-list" [attr.aria-label]="'processing.steps-aria' | translate">
+    @for (step of steps(); track step.id) {
+      <li class="step-item" [attr.data-status]="step.status">
+        <div class="step-head">
+          <span class="step-label">{{ stepLabels[step.id] | translate }}</span>
+          <vd-status-badge [status]="step.status" />
+        </div>
+
+        @if (step.status === 'running' || step.progressPercent > 0) {
+          <div
+            class="progress step-progress"
+            role="progressbar"
+            [attr.aria-label]="'processing.step-progress-aria' | translate: { step: stepLabels[step.id] | translate }"
+            [attr.aria-valuenow]="stepPercent(step)"
+            aria-valuemin="0"
+            aria-valuemax="100"
+          >
+            <span [style.width.%]="stepPercent(step)"></span>
+          </div>
+        }
+
+        @if (step.error) {
+          <p class="step-error mono">{{ step.error }}</p>
+        }
+
+        @if (step.status === 'failed') {
+          <div>
+            <button type="button" class="btn btn-sm" (click)="retry(step.id)">
+              {{ 'processing.retry-step' | translate }}
+            </button>
+          </div>
+        }
+      </li>
+    } @empty {
+      <li class="muted">
+        <vd-busy-indicator [active]="true" [label]="'processing.waiting-start' | translate" />
+      </li>
+    }
+  </ol>
+
+  <!-- Live log panel -->
+  <div class="card stack">
+    <div class="row row-between">
+      <strong>{{ 'processing.logs' | translate }}</strong>
+      <span class="muted">{{ 'processing.log-lines' | translate: { count: events.logs().length } }}</span>
+    </div>
+    <div class="log-panel" role="log" aria-live="polite" [attr.aria-label]="'processing.logs-aria' | translate">
+      @for (line of events.logs(); track $index) {
+        <div class="log-line" [attr.data-level]="line.level">
+          <span class="log-ts mono">{{ line.ts }}</span>
+          <span class="log-level">{{ line.level }}</span>
+          <span class="log-msg">{{ line.message }}</span>
+        </div>
+      } @empty {
+        <div class="muted log-empty">{{ 'processing.no-logs' | translate }}</div>
+      }
+    </div>
+  </div>
+</section>

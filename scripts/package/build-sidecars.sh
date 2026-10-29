@@ -1,0 +1,307 @@
+#!/usr/bin/env bash
+#
+# scripts/package/build-sidecars.sh — Build ALL Tauri externalBin sidecars for a
+# fully self-contained installer:
+#
+#   videodubber-orchestrator   (Node SEA)        <- build-orchestrator.sh
+#   vd-stt-worker              (PyInstaller)     <- build-workers.sh
+#   vd-translation-worker      (PyInstaller)     <- build-workers.sh
+#   vd-tts-worker              (PyInstaller)     <- build-workers.sh
+#   vd-piper                   (PyInstaller)     <- build-workers.sh (piper CLI)
+#   ffmpeg / ffprobe           (static, libass)  <- fetch-ffmpeg.sh
+#
+# All land in apps/desktop/src-tauri/binaries/ suffixed with the Rust target
+# triple (e.g. -aarch64-apple-darwin), which is exactly what tauri.conf.json's
+# bundle.externalBin expects.
+#
+# Run from anywhere:  bash scripts/package/build-sidecars.sh
+# Or via pnpm:        pnpm package:sidecars
+#
+# Env knobs (forwarded to the sub-scripts)
+# ---------
+#   TARGET_TRIPLE   Override the auto-detected Rust host triple.
+#   SKIP_WORKERS    "1" => skip the PyInstaller worker sidecars.
+#   SKIP_ORCH       "1" => skip the Node orchestrator sidecar.
+#   SKIP_FFMPEG     "1" => skip the ffmpeg/ffprobe fetch.
+#
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." >/dev/null 2>&1 && pwd)"
+BIN_DIR="${REPO_ROOT}/apps/desktop/src-tauri/binaries"
+
+# Load .env so machine-specific paths (FFMPEG_PATH/FFPROBE_PATH for the local
+# ffmpeg-copy mode, PYTHON_PATH, etc.) are available to this script AND every
+# sub-script it spawns. Without this, fetch-ffmpeg.sh can't find a local
+# libass-enabled ffmpeg and falls back to a network download.
+if [[ -f "${REPO_ROOT}/.env" ]]; then set -a; . "${REPO_ROOT}/.env"; set +a; fi
+
+resolve_triple() {
+  if [[ -n "${TARGET_TRIPLE:-}" ]]; then echo "${TARGET_TRIPLE}"; return; fi
+  if command -v rustc >/dev/null 2>&1; then rustc -Vv | sed -n 's/^host: //p'; return; fi
+  echo "ERROR: rustc not found and TARGET_TRIPLE not set." >&2; exit 1
+}
+TRIPLE="$(resolve_triple)"
+export TARGET_TRIPLE="${TRIPLE}"
+
+echo "############################################################"
+echo "# VideoDubber — building self-contained sidecars"
+echo "#   triple: ${TRIPLE}"
+echo "#   out:    ${BIN_DIR}"
+echo "############################################################"
+
+mkdir -p "${BIN_DIR}"
+
+if [[ "${SKIP_ORCH:-0}" != "1" ]]; then
+  echo ""; echo "### Orchestrator ###########################################"
+  bash "${SCRIPT_DIR}/build-orchestrator.sh"
+fi
+
+# uv + the standalone CPython are staged BEFORE the workers on purpose: since
+# 2026-09 build-workers.sh freezes from a throwaway venv that `uv venv --python
+# <bundled cpython>` creates, instead of the maintainer's dev venv (which is how
+# v0.8.1 shipped macOS-26-only workers). If these two ran after the workers, a
+# clean checkout would silently take build-workers' dev-venv fallback.
+if [[ "${SKIP_UV:-0}" != "1" ]]; then
+  echo ""; echo "### uv (engine-pack Python env manager) ####################"
+  # Non-fatal: a missing uv only disables the optional Python engine packs;
+  # the base app + model downloads still work fully.
+  bash "${SCRIPT_DIR}/fetch-uv.sh" || echo "WARNING: uv fetch failed; Python engine packs (neural TTS / separation / alignment) will be unavailable until uv is bundled or installed." >&2
+fi
+
+if [[ "${SKIP_PYTHON:-0}" != "1" ]]; then
+  echo ""; echo "### Bundled CPython for uv (offline engine-pack installs) ###"
+  # Non-fatal: if this fails, uv falls back to downloading CPython on first pack
+  # install (needs network). Bundling it lets pack installs work on flaky links.
+  bash "${SCRIPT_DIR}/fetch-python.sh" || echo "WARNING: python pre-install failed; engine packs will have uv download CPython on first install (needs a reliable connection to GitHub)." >&2
+fi
+
+# `resources/python` is a DECLARED Tauri resource (tauri.conf.json), so it MUST
+# exist at `tauri build` time even if the optional pre-install above was skipped
+# or failed — otherwise the bundle step aborts. Guarantee it (a placeholder keeps
+# it non-empty; the runtime treats "no cpython-* inside" as "not bundled" and has
+# uv download CPython on first use).
+PY_RES="${REPO_ROOT}/apps/desktop/src-tauri/resources/python"
+mkdir -p "${PY_RES}"
+if ! find "${PY_RES}" -maxdepth 1 -name 'cpython-*' | grep -q .; then
+  echo "Bundled CPython for uv is staged here by fetch-python at build time. If absent, the app downloads CPython on first engine-pack install." > "${PY_RES}/README.txt"
+fi
+
+if [[ "${SKIP_WORKERS:-0}" != "1" ]]; then
+  echo ""; echo "### Python workers #########################################"
+  bash "${SCRIPT_DIR}/build-workers.sh"
+fi
+
+# `resources/workers` is a DECLARED Tauri resource (the one-dir stt/translation/tts
+# trees land here). It MUST exist at `tauri build` time even if SKIP_WORKERS was set,
+# or the bundle step aborts on the missing declared resource. Guarantee it.
+WORKERS_RES="${REPO_ROOT}/apps/desktop/src-tauri/resources/workers"
+mkdir -p "${WORKERS_RES}"
+[[ -n "$(ls -A "${WORKERS_RES}" 2>/dev/null)" ]] || \
+  echo "One-dir Python worker trees (vd-stt/translation/tts-worker) are staged here at build time." > "${WORKERS_RES}/README.txt"
+
+if [[ "${SKIP_FFMPEG:-0}" != "1" ]]; then
+  echo ""; echo "### FFmpeg / ffprobe #######################################"
+  bash "${SCRIPT_DIR}/fetch-ffmpeg.sh"
+fi
+
+if [[ "${SKIP_ENGINE_SRC:-0}" != "1" ]]; then
+  echo ""; echo "### Engine-pack worker source (vd_tts_engine) ##############"
+  # Cheap (copies a few Python files). Bundled as an app resource so the packaged
+  # app can run the VieNeu neural-TTS pack with nothing for the user to install.
+  # Node script (cross-platform) so POSIX + Windows stage it identically.
+  node "${SCRIPT_DIR}/stage-engine-src.mjs"
+fi
+
+# `resources/default-models` is a DECLARED Tauri resource — always exists.
+DM_RES="${REPO_ROOT}/apps/desktop/src-tauri/resources/default-models"
+# Bundling the default models is OPT-IN (BUNDLE_DEFAULT_MODELS=1): it makes a
+# first en->vi / zh->vi dub work fully offline, but adds ~1 GB to the installer.
+# The DEFAULT is a small installer that downloads the models on first run (like
+# v0.2.0) — the runtime seed-copy (sidecar.rs) simply no-ops when none are bundled.
+if [[ "${BUNDLE_DEFAULT_MODELS:-0}" == "1" ]]; then
+  echo ""; echo "### Default-pipeline models — BUNDLED (offline out-of-box, +~1 GB) ###"
+  # WHICH pairs is the single source of truth defaultBundle.ts (today en->vi +
+  # zh->vi); the staging script derives the rest. The assertion below then fails
+  # the release if any bundled pair's models are missing.
+  bash "${SCRIPT_DIR}/fetch-default-models.sh" || \
+    echo "WARNING: default-model staging failed; the installer will need a first-run download." >&2
+else
+  echo ""; echo "### Default-pipeline models — NOT bundled (small installer; download on first run) ###"
+  # Clear any previously-staged models so a small build never carries them.
+  rm -rf "${DM_RES}/huggingface" "${DM_RES}/argos" "${DM_RES}/piper"
+fi
+mkdir -p "${DM_RES}"
+[[ -n "$(ls -A "${DM_RES}" 2>/dev/null)" ]] || \
+  echo "Default-pipeline models are bundled here only when BUNDLE_DEFAULT_MODELS=1 (offline out-of-box dub); otherwise the app downloads them on first run." > "${DM_RES}/README.txt"
+
+echo ""
+echo "############################################################"
+echo "# Done. Sidecars in ${BIN_DIR}:"
+echo "############################################################"
+ls -1 "${BIN_DIR}" | grep -E "^(videodubber-orchestrator|vd-piper|vd-uv|ffmpeg|ffprobe)-" || {
+  echo "WARNING: no sidecars matched the expected naming. Check the logs above." >&2
+}
+echo "# One-dir worker trees in resources/workers:"
+ls -1d "${REPO_ROOT}/apps/desktop/src-tauri/resources/workers"/*/ 2>/dev/null || echo "  (none)"
+
+# Sanity: warn if any expected base is missing for this triple. The 3 server
+# workers are one-dir trees under resources/workers/<base>/ (not single files).
+EXE_SUFFIX=""
+case "${TRIPLE}" in *windows*) EXE_SUFFIX=".exe" ;; esac
+for base in videodubber-orchestrator vd-piper vd-uv ffmpeg ffprobe; do
+  f="${BIN_DIR}/${base}-${TRIPLE}${EXE_SUFFIX}"
+  [[ -f "${f}" ]] || echo "NOTE: missing ${f} (skipped or failed?)."
+done
+for base in vd-stt-worker vd-translation-worker vd-tts-worker; do
+  d="${REPO_ROOT}/apps/desktop/src-tauri/resources/workers/${base}"
+  [[ -x "${d}/${base}${EXE_SUFFIX}" ]] || echo "NOTE: missing one-dir worker ${d}/${base}${EXE_SUFFIX} (skipped or failed?)."
+done
+
+# --- Release bundle assertion ------------------------------------------------
+# A RELEASE must ship the bundled uv + CPython (so the optional Python engine
+# packs install with NOTHING preinstalled), and — WHEN opted into bundling the
+# default models — those too. Fail the build rather than silently ship a degraded
+# installer. Set ASSERT_BUNDLE=0 to downgrade to warnings for a partial build.
+if [[ "${ASSERT_BUNDLE:-1}" == "1" ]]; then
+  miss=0
+  need() { if compgen -G "$2" >/dev/null; then :; else echo "::error:: missing bundled $1 ($2)"; miss=1; fi; }
+  if [[ "${BUNDLE_DEFAULT_MODELS:-0}" == "1" ]]; then
+    need "default whisper model" "${DM_RES}/huggingface/models--*"
+    # Assert EACH bundled pair's Argos leg + Piper voice individually, derived from
+    # the SAME source of truth the staging used (defaultBundle.ts via the bridge).
+    # A pair-agnostic glob (argos/*) would pass even with a pair missing — this
+    # loop is the real release gate the bundled-pairs feature relies on.
+    if plan="$("${REPO_ROOT}/node_modules/.bin/tsx" "${REPO_ROOT}/packages/node-orchestrator/scripts/print-default-bundle.ts" --sh 2>/dev/null)"; then
+      while IFS=$'\t' read -r kind a b _; do
+        case "$kind" in
+          # Anchor the version suffix (`-`) so a leg can't false-match a longer
+          # language code (en_vi- vs en_vie-).
+          argos) need "Argos ${a}->${b}" "${DM_RES}/argos/translate-${a}_${b}-"* ;;
+          # A Piper voice needs BOTH the model AND its .onnx.json config to load.
+          piper) need "Piper voice ${a}" "${DM_RES}/piper/${a}.onnx"
+                 need "Piper config ${a}" "${DM_RES}/piper/${a}.onnx.json" ;;
+        esac
+      done <<< "$plan"
+    else
+      echo "::error:: could not compute the default-bundle plan for the release assertion"; miss=1
+    fi
+  fi
+  [[ "${SKIP_UV:-0}" == "1" ]]     || need "uv binary"        "${BIN_DIR}/vd-uv-${TRIPLE}${EXE_SUFFIX}"
+  [[ "${SKIP_PYTHON:-0}" == "1" ]] || need "bundled CPython"  "${PY_RES}/cpython-"*
+
+  # The orchestrator was never asserted here at all. build-orchestrator copies the
+  # node binary to the output path BEFORE postject injects the SEA blob, so the
+  # file exists even when the injection fails — and a bare node starts a REPL
+  # instead of binding :5100, passing every "is the file there" check on the way
+  # to a bricked installer. Compare it against the node it was copied from.
+  # Ask the BINARY whether the blob is in it, rather than comparing it against a
+  # node binary. Two reasons a size comparison is wrong here: build-orchestrator
+  # runs `codesign --remove-signature` on macOS between the copy and the injection
+  # (measured on 0.9.0, that leaves only a 984 KB margin on a 121 MB file), and the
+  # node this gate would compare against is whatever is on PATH *now* — under nvm
+  # that is routinely a different version from the NODE_BIN that built the sidecar,
+  # so the check could fail open or closed for reasons unrelated to postject.
+  # The NODE_SEA Mach-O segment exists iff postject wrote the blob; a bare node
+  # reports zero matches. Non-Mach-O hosts keep the size comparison (nothing is
+  # stripped there, so growth is sound) — but this script's release path is macOS.
+  if [[ "${SKIP_ORCH:-0}" != "1" ]]; then
+    _orch="${BIN_DIR}/videodubber-orchestrator-${TRIPLE}${EXE_SUFFIX}"
+    if [[ ! -f "${_orch}" ]]; then
+      echo "::error:: missing orchestrator sidecar (${_orch})"; miss=1
+    elif [[ "${TRIPLE}" == *apple-darwin* ]] && command -v otool >/dev/null 2>&1; then
+      if ! otool -l "${_orch}" 2>/dev/null | grep -q 'segname NODE_SEA'; then
+        echo "::error:: ${_orch} has no NODE_SEA segment — the SEA blob was not injected"
+        echo "::error::   (it would start a Node REPL, not the orchestrator)"
+        miss=1
+      fi
+    else
+      _node="${NODE_BIN:-$(command -v node || true)}"
+      if [[ -n "${_node}" ]] && [[ -f "${_node}" ]] \
+         && [[ "$(wc -c < "${_orch}" | tr -d ' ')" -le "$(wc -c < "${_node}" | tr -d ' ')" ]]; then
+        echo "::error:: ${_orch} is no larger than the node binary — the SEA blob was not injected"
+        echo "::error::   (it would start a Node REPL, not the orchestrator)"
+        miss=1
+      fi
+    fi
+  fi
+
+  # The declared macOS floor must not be BELOW what the bundled binaries need.
+  # Tauri's default LSMinimumSystemVersion is 10.13, but our Node SEA
+  # orchestrator is built for 13.5 — so the installer happily ran on a Mac where
+  # the backend could never start, with no diagnosable error. Compare the
+  # declared value against the highest `minos` we actually ship.
+  # Scan EVERY Mach-O we ship, not just the externalBin sidecars. The PyInstaller
+  # workers are onedir bundles under resources/workers/, and the binary that
+  # actually gates startup is not their launcher (minos 11.0) but the CPython
+  # extension modules it dlopen()s — _internal/python3.*/lib-dynload/*.so, whose
+  # minos comes from whatever interpreter the build venv was created with. A
+  # Homebrew python@3.13 on a macOS 26 box stamps minos 26.0 onto all of them, so
+  # every worker dies at `import zlib` on any older Mac while the launcher itself
+  # looks fine. Scanning only "${BIN_DIR}"/* is what let that ship.
+  if command -v otool >/dev/null 2>&1 && [[ "${TRIPLE}" == *apple-darwin* ]]; then
+    declared="$(node -p "require('${REPO_ROOT}/apps/desktop/src-tauri/tauri.conf.json').bundle?.macOS?.minimumSystemVersion ?? '10.13'")"
+    highest="0"; highest_file=""
+    RES_DIR="${REPO_ROOT}/apps/desktop/src-tauri/resources"
+    while IFS= read -r _f; do
+      [[ -f "${_f}" ]] || continue
+      # Cheap pre-filter: only ask otool about actual Mach-O files.
+      case "$(file -b "${_f}" 2>/dev/null)" in *Mach-O*) ;; *) continue ;; esac
+      _m="$(otool -l "${_f}" 2>/dev/null | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print $2; exit}')"
+      [[ -n "${_m}" ]] || continue
+      # Numeric compare on major.minor (sort -V handles the ordering).
+      if [[ "$(printf '%s\n%s\n' "${highest}" "${_m}" | sort -V | tail -1)" == "${_m}" ]] \
+         && [[ "${_m}" != "${highest}" ]]; then
+        highest="${_m}"; highest_file="${_f}"
+      fi
+    done < <(
+      find "${BIN_DIR}" -maxdepth 1 -type f -name "*-${TRIPLE}" 2>/dev/null
+      # resources/: the PyInstaller workers (+ their bundled dylibs/.so) and the
+      # standalone CPython staged for uv. Both end up inside the .app.
+      find "${RES_DIR}/workers" "${RES_DIR}/python" \
+           -type f \( -perm -u+x -o -name '*.dylib' -o -name '*.so' \) 2>/dev/null
+    )
+    if [[ "${highest}" != "0" ]] && [[ "$(printf '%s\n%s\n' "${declared}" "${highest}" | sort -V | tail -1)" != "${declared}" ]]; then
+      echo "::error:: tauri.conf.json declares macOS ${declared}, but a bundled binary requires macOS ${highest}:"
+      echo "::error::   ${highest_file#"${REPO_ROOT}/"}"
+      echo "::error:: The app would install and then fail to start on every Mac below ${highest}."
+      echo "::error:: If this is a resources/workers/** file, the build venv used the wrong"
+      echo "::error:: interpreter: rebuild it from the bundled standalone CPython"
+      echo "::error:: (${PY_RES#"${REPO_ROOT}/"}/cpython-*) rather than a Homebrew python."
+      echo "::error:: build-workers.{sh,ps1} do that by default since 2026-09 — check for the"
+      echo "::error:: 'falling back to the DEV venvs' warning earlier in this build's log."
+      echo "::error:: If the offender is a WHEEL (numpy / onnxruntime / av .so at minos 14.0),"
+      echo "::error:: no build flag fixes it: those projects publish macosx_14_0_arm64 only, and"
+      echo "::error:: capping them with WHEEL_PYTHON_PLATFORM=macos was measured to fail (av has"
+      echo "::error:: no wheel at or below 12.0 and its source build breaks)."
+      echo "::error:: Otherwise raise bundle.macOS.minimumSystemVersion to ${highest} (and update README.md)."
+      miss=1
+    fi
+  fi
+
+  # ffmpeg/ffprobe must be PORTABLE. A dynamically-linked build (e.g. staged from
+  # Homebrew because FFMPEG_PATH was exported for dev) signs, notarizes and
+  # installs fine, then fails to launch on every machine but this one — taking
+  # all dubbing with it. v0.3.0 shipped exactly that, so the gate lives here too,
+  # not only in fetch-ffmpeg.sh: this is the last point before `tauri build`.
+  if command -v otool >/dev/null 2>&1; then
+    for _b in ffmpeg ffprobe; do
+      _p="${BIN_DIR}/${_b}-${TRIPLE}${EXE_SUFFIX}"
+      [[ -f "${_p}" ]] || continue
+      _bad="$(otool -L "${_p}" 2>/dev/null | tail -n +2 | awk '{print $1}' \
+        | grep -v -E '^(/usr/lib/|/System/Library/)' || true)"
+      if [[ -n "${_bad}" ]]; then
+        echo "::error:: bundled ${_b} links non-system libraries (not portable):"
+        printf '  %s\n' ${_bad}
+        echo "::error:: re-stage it with: unset FFMPEG_PATH FFPROBE_PATH FFMPEG_BIN FFPROBE_BIN; bash scripts/package/fetch-ffmpeg.sh"
+        miss=1
+      fi
+    done
+  fi
+  if [[ "${miss}" == "1" ]]; then
+    echo "::error:: release bundle is MISSING required built-in dependencies (see above)." >&2
+    echo "          Re-run with network, or set ASSERT_BUNDLE=0 to ship a degraded build on purpose." >&2
+    exit 1
+  fi
+  echo "✓ bundle assertion passed: default models + uv + CPython are all bundled."
+fi

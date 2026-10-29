@@ -1,0 +1,110 @@
+[package]
+name = "videodubber-desktop"
+version = "0.10.0"
+description = "VideoDubber — local/offline-first desktop app that dubs videos into another language."
+authors = ["VideoDubber"]
+edition = "2021"
+# Tauri 2 requires a reasonably recent stable toolchain.
+rust-version = "1.77.2"
+
+# ---------------------------------------------------------------------------
+# Tauri 2 standard crate layout.
+#
+# Tauri 2 desktop projects use BOTH a library crate and a thin binary:
+#   * `src/lib.rs`  — exposes `pub fn run()` and is compiled as `cdylib`
+#                     (so mobile targets can link it) + `rlib` (so the
+#                     desktop binary can call it).
+#   * `src/main.rs` — a tiny shim that calls `videodubber_desktop_lib::run()`.
+#
+# The library crate name MUST differ from the binary crate name on Windows,
+# hence the `_lib` suffix that Tauri's own templates use.
+# ---------------------------------------------------------------------------
+[lib]
+name = "videodubber_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+# Generates the Tauri context (reads tauri.conf.json, embeds capabilities, etc.).
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Core Tauri runtime. The `protocol-asset` feature lets the webview load local
+# files via the asset protocol if ever needed; otherwise default features are
+# sufficient for a single-window desktop shell.
+tauri = { version = "2", features = [] }
+
+# Official Tauri 2 plugins used by this shell:
+#   * dialog  -> native open-file dialog for picking a video.
+#   * opener  -> open a path/URL with the OS default handler (release notes URLs).
+#   * updater -> self-update via GitHub Releases + the `latest.json` manifest.
+#               (UpdaterExt::updater, Update::download_and_install).
+#   * process -> relaunch the app after an update is installed (restart()).
+#   * shell   -> spawn the bundled `externalBin` sidecars in PRODUCTION
+#               (ShellExt::shell().sidecar("…")). The dev path still uses
+#               std::process to launch scripts/start-services.sh.
+#   * single-instance -> refuse a SECOND copy of the app and focus the first.
+#               Load-bearing here, not cosmetic: two instances both try to own
+#               ports 5100-5103, and the second one's QUIT runs the port sweep
+#               (sidecar.rs::sweep_service_ports), which kills the FIRST
+#               instance's orchestrator out from under a running dub.
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-single-instance = "2"
+
+# Serialization for command params / responses.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# HTTP client used by `orchestrator_client.rs` to proxy commands to the
+# Node orchestrator (default http://127.0.0.1:5100). `json` feature gives us
+# `.json()` (de)serialization helpers.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+
+# Async runtime. Tauri re-exports `tauri::async_runtime` (a tokio wrapper); we
+# also use tokio directly in commands.rs (oneshot channel bridging the dialog).
+tokio = { version = "1", features = ["full"] }
+
+# Process control for the managed backend, per platform.
+#
+# unix: signal the orchestrator (SIGTERM, so its SIGTERM handler runs
+#       engineManager.stopAll() and multi-GB llama.cpp/whisper.cpp servers are
+#       not orphaned) and probe liveness with `kill(pid, 0)` — previously this
+#       shelled out to /bin/kill on every poll.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# windows: a Job Object with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE. Windows has no
+#          process groups we can signal and Node cannot receive SIGTERM there,
+#          so the ONLY reliable way to guarantee the whole backend descendant
+#          tree dies with the app — including if the app crashes — is to put
+#          every spawned backend process in a job whose handle we hold open for
+#          the process lifetime. See sidecar.rs::job.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
+# ---------------------------------------------------------------------------
+# Service management (auto start/stop of the backend) lives in `sidecar.rs` and
+# is ON by default — opening the app boots the orchestrator + workers, quitting
+# stops them. It uses only `std::process`, so there is no cargo feature to
+# toggle; disable at runtime with `VIDEODUBBER_MANAGE_SERVICES=0` instead.
+# ---------------------------------------------------------------------------
+
+# Custom protocol is the production transport; this is the standard Tauri 2
+# release profile tweak to keep binaries small.
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

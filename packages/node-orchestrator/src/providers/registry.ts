@@ -1,0 +1,319 @@
+/**
+ * Provider registry.
+ *
+ * Maps a `providerId` to a concrete provider instance for each capability
+ * (STT / translation / TTS). Local providers are the defaults:
+ *   - STT:         `faster-whisper`
+ *   - Translation: `argos`
+ *   - TTS:         `piper-local`
+ *
+ * Cloud providers (per-phase, opt-in) are fetch-based adapters that read their
+ * API key from the {@link CredentialsStore} ON EVERY CALL — registering them is
+ * free, and nothing cloud-related runs until a project actually selects one:
+ *   - STT:         `openai-stt`
+ *   - Translation: `openai-translate`, `anthropic-translate`, `gemini-translate`
+ *   - TTS:         `openai-tts`
+ *
+ * The registry is the single composition point, so tests can build a registry
+ * out of mocked providers and inject it into the pipeline runner.
+ */
+import { AppErrorException, type CloudServiceId, type SystemProfile } from '@videodubber/shared';
+import type { OrchestratorConfig } from '../config.js';
+import { CredentialsStore } from '../credentials/credentialsStore.js';
+import type {
+  CancellableSttProvider,
+  CancellableTranslationProvider,
+  CancellableTtsProvider,
+} from './types.js';
+import { FasterWhisperProvider } from './stt/fasterWhisperProvider.js';
+import { OpenAiSttProvider } from './stt/openaiSttProvider.js';
+import { WhisperCppProvider } from './stt/whisperCppProvider.js';
+import { ArgosTranslationProvider } from './translation/argosProvider.js';
+import { LibreTranslateProvider } from './translation/libreTranslateProvider.js';
+import { LlmTranslationProvider } from './translation/llmTranslationProvider.js';
+import { LocalLlmTranslationProvider } from './translation/localLlmTranslationProvider.js';
+import { LocalTtsProvider } from './tts/localTtsProvider.js';
+import { NeuralTtsProvider } from './tts/neuralTtsProvider.js';
+import { OpenAiTtsProvider } from './tts/openaiTtsProvider.js';
+import type { EngineManager } from '../engines/engineManager.js';
+import type { EnginePackStore } from '../engines/enginePackStore.js';
+import {
+  requireInstalledPack,
+  installedPacksForProvider,
+  resolveLocalLlmChatModel,
+  resolveLocalLlmModelPath,
+} from '../engines/packSelection.js';
+import { ContextRepairTranslationProvider } from './translation/contextRepairProvider.js';
+import { availablePacks } from '../engines/enginePackCatalog.js';
+import { packHardwareSupported } from '../engines/engineRecommendation.js';
+
+/**
+ * Default local-LLM models per backend (overridable via env).
+ *
+ * The default is the **4B** TranslateGemma — the only size that is comfortable on
+ * a no-GPU 8–16 GB machine (12B is ~7–8 GB and ~1–5 tok/s CPU-only). Bigger sizes
+ * are an explicit opt-in: for the managed llama.cpp path the user installs a
+ * `translategemma-12b`/`-27b` model pack (the launch uses whichever GGUF is
+ * installed, so it is inherently tier-aware); for Ollama they `ollama pull
+ * translategemma:12b` and set OLLAMA_MODEL. Note the llama.cpp path loads the
+ * model by FILE (resolveLocalLlmModelPath), so LLAMACPP_MODEL is only a label.
+ */
+export const OLLAMA_URL = process.env.OLLAMA_URL?.trim() || 'http://127.0.0.1:11434/v1';
+export const OLLAMA_MODEL = process.env.OLLAMA_MODEL?.trim() || 'translategemma:4b';
+const LLAMACPP_MODEL = process.env.LLAMACPP_MODEL?.trim() || 'translategemma-4b';
+
+/** Default provider ids per capability. */
+export const DEFAULT_PROVIDER_IDS = {
+  stt: 'faster-whisper',
+  translation: 'argos',
+  tts: 'piper-local',
+} as const;
+
+/** Lightweight descriptor for listing providers in the UI. */
+export interface ProviderDescriptor {
+  id: string;
+  displayName: string;
+  isLocal: boolean;
+  /** Cloud service whose API key this provider needs (cloud providers only). */
+  credentialService?: CloudServiceId;
+  /** Engine-pack family this provider needs (local pack-gated providers). */
+  requiresEnginePack?: string;
+  /** Translation providers only: can run the review-and-refine pass. */
+  supportsRefinement?: boolean;
+}
+
+/** Holds all known providers and resolves them by id. */
+export class ProviderRegistry {
+  private readonly stt = new Map<string, CancellableSttProvider>();
+  private readonly translation = new Map<string, CancellableTranslationProvider>();
+  private readonly tts = new Map<string, CancellableTtsProvider>();
+
+  /** Register an STT provider. */
+  registerStt(provider: CancellableSttProvider): void {
+    this.stt.set(provider.id, provider);
+  }
+
+  /** Register a translation provider. */
+  registerTranslation(provider: CancellableTranslationProvider): void {
+    this.translation.set(provider.id, provider);
+  }
+
+  /** Register a TTS provider. */
+  registerTts(provider: CancellableTtsProvider): void {
+    this.tts.set(provider.id, provider);
+  }
+
+  /** Resolve an STT provider by id, falling back to the default. */
+  getStt(id?: string): CancellableSttProvider {
+    return this.resolve(this.stt, id, DEFAULT_PROVIDER_IDS.stt, 'STT');
+  }
+
+  /** Resolve a translation provider by id, falling back to the default. */
+  getTranslation(id?: string): CancellableTranslationProvider {
+    return this.resolve(this.translation, id, DEFAULT_PROVIDER_IDS.translation, 'translation');
+  }
+
+  /** Resolve a TTS provider by id, falling back to the default. */
+  getTts(id?: string): CancellableTtsProvider {
+    return this.resolve(this.tts, id, DEFAULT_PROVIDER_IDS.tts, 'TTS');
+  }
+
+  /** List all registered providers grouped by capability (for the UI). */
+  describe(): { stt: ProviderDescriptor[]; translation: ProviderDescriptor[]; tts: ProviderDescriptor[] } {
+    const map = (p: {
+      id: string;
+      displayName: string;
+      isLocal: boolean;
+      credentialService?: CloudServiceId;
+      requiresEnginePack?: string;
+      supportsRefinement?: boolean;
+    }): ProviderDescriptor => ({
+      id: p.id,
+      displayName: p.displayName,
+      isLocal: p.isLocal,
+      ...(p.credentialService ? { credentialService: p.credentialService } : {}),
+      ...(p.requiresEnginePack ? { requiresEnginePack: p.requiresEnginePack } : {}),
+      ...(p.supportsRefinement ? { supportsRefinement: true } : {}),
+    });
+    return {
+      stt: [...this.stt.values()].map(map),
+      translation: [...this.translation.values()].map(map),
+      tts: [...this.tts.values()].map(map),
+    };
+  }
+
+  private resolve<T extends { id: string }>(
+    map: Map<string, T>,
+    id: string | undefined,
+    defaultId: string,
+    kind: string,
+  ): T {
+    const wanted = id && id.length > 0 ? id : defaultId;
+    const provider = map.get(wanted) ?? map.get(defaultId);
+    if (!provider) {
+      throw new AppErrorException('UNKNOWN', `No ${kind} provider registered for id "${wanted}".`, {
+        remediation: `Register a ${kind} provider or pick one of: ${[...map.keys()].join(', ')}.`,
+      });
+    }
+    return provider;
+  }
+}
+
+/**
+ * Build the default registry from config: local providers wired to the worker
+ * URLs, plus the fetch-based cloud adapters bound to the credentials store.
+ * Tests bypass this and construct their own.
+ */
+export function createDefaultRegistry(
+  config: OrchestratorConfig,
+  credentials: CredentialsStore = new CredentialsStore(config.configDir),
+  engines?: EngineManager,
+  store?: EnginePackStore,
+  profile?: SystemProfile,
+): ProviderRegistry {
+  const registry = new ProviderRegistry();
+  const timeout = config.workerRequestTimeoutMs;
+
+  // True if the machine has ANY installable pack for a provider — the right OS/arch
+  // AND (when we know the hardware) an accelerator the build can use. Used to avoid
+  // offering a provider whose only packs can't run here (e.g. whisper.cpp, which
+  // ships CUDA-only: no pack exists for macOS or a non-NVIDIA Windows box, so the
+  // "needs engine pack" option would be a dead end with nothing to install).
+  const hasRunnablePack = (providerId: string): boolean =>
+    availablePacks().some(
+      (p) => p.providerId === providerId && (!profile || packHardwareSupported(p, profile)),
+    );
+
+  // Local (default) providers — always present, no engine pack required.
+  registry.registerStt(new FasterWhisperProvider(config.sttWorkerUrl, timeout));
+  const argos = new ArgosTranslationProvider(config.translationWorkerUrl, timeout);
+  registry.registerTranslation(argos);
+  registry.registerTts(new LocalTtsProvider(config.ttsWorkerUrl, timeout));
+
+  // Cloud providers (OpenAI / Anthropic / Gemini). We run NO servers of our own;
+  // these are THIRD-PARTY services the end user opts into and pays for directly,
+  // so they're always offered — per-phase, key-gated, never a default. Keys
+  // resolve lazily per call, so an unconfigured provider costs nothing until a
+  // project selects it.
+  registry.registerStt(new OpenAiSttProvider(credentials, timeout));
+  registry.registerTranslation(new LlmTranslationProvider('openai', credentials, timeout));
+  registry.registerTranslation(new LlmTranslationProvider('anthropic', credentials, timeout));
+  registry.registerTranslation(new LlmTranslationProvider('gemini', credentials, timeout));
+  registry.registerTts(new OpenAiTtsProvider(credentials, timeout));
+
+  // Ollama: a user-run local LLM daemon — no engine pack, no key. Available
+  // whenever the daemon answers (the /providers route preflights it).
+  registry.registerTranslation(
+    new LocalLlmTranslationProvider({
+      id: 'ollama',
+      displayName: 'TranslateGemma (via Ollama)',
+      backend: 'ollama',
+      model: OLLAMA_MODEL,
+      resolveBaseUrl: async () => OLLAMA_URL,
+      timeoutMs: timeout,
+    }),
+  );
+
+  // Engine-pack-backed local engines (registered only when the runtime is
+  // wired). They list in the UI as "needs engine pack" until installed; calling
+  // one without its pack throws ENGINE_PACK_MISSING.
+  if (engines && store) {
+    // whisper.cpp accelerated STT — only offer it where a pack can actually run
+    // (CUDA-only today, so NVIDIA Windows). Elsewhere the bundled faster-whisper
+    // is the local STT, so we don't show a "needs engine pack" dead end.
+    if (hasRunnablePack('whisper-cpp')) {
+      registry.registerStt(
+        new WhisperCppProvider(engines, () => requireInstalledPack(store, 'whisper-cpp'), timeout),
+      );
+    }
+    // Local-LLM translation (llama.cpp runtime + a TranslateGemma model) — only
+    // where a runtime pack can run here (Metal on Apple Silicon, CUDA/Vulkan on
+    // Windows). The model packs list separately in Settings → Engines.
+    if (hasRunnablePack('local-llm')) {
+    registry.registerTranslation(
+      new LocalLlmTranslationProvider({
+        id: 'llama-cpp',
+        displayName: 'TranslateGemma (built-in)',
+        backend: 'llama-cpp',
+        model: LLAMACPP_MODEL,
+        resolveBaseUrl: async () => {
+          // Needs BOTH: a llama.cpp runtime binary pack AND a TranslateGemma model
+          // pack. Resolve the GGUF first so a missing-model install fails fast with
+          // a clear ENGINE_PACK_MISSING instead of starting a model-less server.
+          // Try every installed llama.cpp runtime, best accelerator first: a
+          // CUDA build that cannot start on this driver must not take the step
+          // down when a working Vulkan/CPU build is installed alongside it.
+          const packIds = await installedPacksForProvider(store, 'local-llm', process.platform, process.arch, profile);
+          if (packIds.length === 0) await requireInstalledPack(store, 'local-llm'); // throws the actionable error
+          const model = await resolveLocalLlmModelPath(store);
+          return engines.ensureRunningFirstUsable(packIds, { exclusive: true, model });
+        },
+        timeoutMs: timeout,
+      }),
+    );
+    // Context-aware offline tiers (same llama.cpp runtime, a Gemma INSTRUCT
+    // model pack — Gemma 3 or the newer Gemma 4): a chat provider that
+    // translates scene batches with the project character sheet
+    // (cast/glossary/xưng hô plan), and the Argos-draft + repair provider
+    // (fast draft, LLM fixes pronouns/terms). TranslateGemma can't power
+    // these — its trained template takes exactly one source text (no
+    // instructions/glossaries), hence the separate model packs. The resolved
+    // endpoint carries the pack's prompt format because Gemma 4 uses a
+    // different chat grammar than Gemma 3 (see packSelection.ts).
+    const chatLlm = new LocalLlmTranslationProvider({
+      id: 'llama-cpp-chat',
+      displayName: 'Gemma chat (built-in, context-aware)',
+      backend: 'llama-cpp',
+      mode: 'chat-json-batch',
+      model: 'gemma-it',
+      resolveBaseUrl: async () => {
+        const packIds = await installedPacksForProvider(store, 'local-llm', process.platform, process.arch, profile);
+        if (packIds.length === 0) await requireInstalledPack(store, 'local-llm'); // throws the actionable error
+        const chatModel = await resolveLocalLlmChatModel(store);
+        const baseUrl = await engines.ensureRunningFirstUsable(packIds, {
+          exclusive: true,
+          model: chatModel.modelPath,
+        });
+        return { baseUrl, promptFormat: chatModel.promptFormat };
+      },
+      timeoutMs: timeout,
+    });
+    registry.registerTranslation(chatLlm);
+    registry.registerTranslation(
+      new ContextRepairTranslationProvider({
+        draft: argos,
+        chat: chatLlm,
+        requiresEnginePack: 'local-llm',
+      }),
+    );
+    }
+    // LibreTranslate (optional engine pack). Same engine as Argos (so not the
+    // default); offered for users who want the LibreTranslate server.
+    registry.registerTranslation(new LibreTranslateProvider(engines, store, timeout));
+    // VieNeu v3-Turbo (48 kHz; Apache-2.0). v2 (tts-neural-v2) is disabled — its
+    // neural path is unvalidated end-to-end, it installs on Windows only, and its
+    // preset voices are CC BY-NC — so register the v2 provider ONLY where its pack
+    // is actually offered (it isn't, while gated), mirroring the OmniVoice pattern.
+    if (availablePacks().some((p) => p.id === 'tts-neural-v2')) {
+      registry.registerTts(
+        new NeuralTtsProvider('neural-tts-v2', 'VieNeu Neural TTS v2 (Vietnamese)', 'neural-tts-v2', engines, store, timeout),
+      );
+    }
+    registry.registerTts(
+      new NeuralTtsProvider('neural-tts', 'VieNeu Neural TTS v3 (Vietnamese)', 'neural-tts', engines, store, timeout),
+    );
+    // OmniVoice — massively-multilingual neural TTS, Apple Silicon ONLY (MLX).
+    // Registered only where its pack can actually run, so it isn't offered as a
+    // permanently-uninstallable option on Windows/Intel. (Its pack `tts-omnivoice`
+    // is gated to darwin/arm64; here we mirror that gate at registration.)
+    if (availablePacks().some((p) => p.id === 'tts-omnivoice')) {
+      registry.registerTts(
+        // exclusive=true: OmniVoice's ~2 GB MLX model evicts other resident heavy
+        // engines before loading (it's marked heavy: true in ENGINE_LAUNCH_SPECS).
+        new NeuralTtsProvider('omnivoice', 'OmniVoice Neural TTS (multilingual)', 'omnivoice', engines, store, timeout, true),
+      );
+    }
+  }
+
+  return registry;
+}

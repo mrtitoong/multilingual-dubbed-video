@@ -1,0 +1,194 @@
+"""FastAPI application for the VideoDubber TTS worker (port 5103).
+
+Endpoints:
+    GET  /health             -> { status:"ok", engines:{piper,system,fallback} }
+    GET  /voices?language=   -> { voices:[{id,language,displayName,engine}] }
+    POST /synthesize-segments-> { segments:[SegmentOut...] }
+
+Local/offline-first: the fallback engine guarantees synthesis always succeeds.
+"""
+
+from __future__ import annotations
+
+import logging
+
+from fastapi import FastAPI, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from app import __version__
+from app.config import settings
+from app.engines import EngineRegistry, model_language
+from app.errors import TtsError
+from app.lang import to_tts_language
+from app.schemas import (
+    HealthResponse,
+    SynthesizeRequest,
+    SynthesizeResponse,
+    Voice,
+    VoicesResponse,
+)
+from app.tts_service import TtsService
+
+# --- structured logging -----------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s :: %(message)s",
+)
+logger = logging.getLogger("tts.main")
+
+# --- app + shared singletons -------------------------------------------------
+app = FastAPI(title="VideoDubber TTS Worker", version=__version__)
+
+# CORS: allow localhost origins (desktop webview / dev servers).
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+registry = EngineRegistry(settings)
+service = TtsService(settings, registry)
+
+
+# --- error handling ----------------------------------------------------------
+@app.exception_handler(TtsError)
+async def _tts_error_handler(_: Request, exc: TtsError) -> JSONResponse:
+    """Render TtsError as the shared { "error": {...} } envelope."""
+    logger.warning("TtsError %s: %s", exc.code, exc.message)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=exc.to_response().model_dump(),
+    )
+
+
+@app.exception_handler(Exception)
+async def _unhandled_handler(_: Request, exc: Exception) -> JSONResponse:
+    """Last-resort handler so clients always get a structured error."""
+    logger.exception("Unhandled error: %s", exc)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": {
+                "code": "UNKNOWN",
+                "message": str(exc) or "Internal TTS worker error.",
+                "remediation": "Check the TTS worker logs for details.",
+                "docsRef": "docs/TROUBLESHOOTING.md",
+            }
+        },
+    )
+
+
+# --- routes ------------------------------------------------------------------
+@app.get("/health", response_model=HealthResponse)
+def health() -> HealthResponse:
+    """Liveness + engine capability flags.
+
+    Plain `def`, like the two routes below, and for the same reason:
+    `registry.capabilities()` calls `SystemEngine.available()`, which on Windows
+    shells out to PowerShell once to enumerate the installed SAPI voices. As a
+    coroutine that subprocess ran ON the event loop, so the endpoint whose whole
+    job is to answer within the orchestrator's 3 s probe budget
+    (workerHttp.ts probeWorkerHealth) was itself the thing blocking the loop.
+    """
+    return HealthResponse(status="ok", engines=registry.capabilities())
+
+
+@app.get("/voices", response_model=VoicesResponse)
+def voices(
+    language: str | None = Query(default=None, description="Filter by language code."),
+) -> VoicesResponse:
+    """List selectable voices for the available engines.
+
+    Always includes the fallback voice. Real engines expose at least one
+    representative voice id when they are available on this machine.
+    """
+    lang = to_tts_language(language) if language else ""
+    listed: list[Voice] = []
+
+    caps = registry.capabilities()
+
+    if caps["piper"]:
+        # Enumerate installed voice models (voices dir + configured model). The
+        # language is parsed from the standard Piper filename convention.
+        for model in registry.piper.candidate_models():
+            model_lang = model_language(model.name) or "*"
+            if lang and model_lang != "*" and model_lang != lang:
+                continue
+            listed.append(
+                Voice(
+                    id=f"piper:{model}",
+                    language=model_lang,
+                    displayName=f"Piper — {model.stem}",
+                    engine="piper",
+                )
+            )
+
+    if caps["system"]:
+        listed.append(
+            Voice(
+                id="system:default",
+                language=lang or "*",
+                displayName="System TTS (OS built-in)",
+                engine="system",
+            )
+        )
+
+    # Fallback is always available.
+    listed.append(
+        Voice(
+            id="fallback",
+            language=lang or "*",
+            displayName="Dev fallback (silent/sine placeholder)",
+            engine="fallback",
+        )
+    )
+
+    return VoicesResponse(voices=listed)
+
+
+@app.post("/synthesize-segments", response_model=SynthesizeResponse)
+def synthesize_segments(req: SynthesizeRequest) -> SynthesizeResponse:
+    """Synthesize one WAV per segment into req.outputDir.
+
+    Declared `def`, NOT `async def`, on purpose. `service.synthesize_segments`
+    is fully synchronous — it runs an engine subprocess per segment, up to
+    TTS_CONCURRENCY at a time — so as a coroutine it pinned the event loop for
+    the entire batch and `GET /health` simply did not answer until the last
+    segment was written. The orchestrator probes health with a 3 s budget
+    (workerHttp.ts probeWorkerHealth) and its readiness gate uses the same
+    probe, so a worker that was busy dubbing was reported dead and a second run
+    was blocked behind it. A plain `def` hands the work to FastAPI's threadpool
+    instead, matching the MT worker and both neural engine packs (the STT
+    worker reaches the same place via `anyio.to_thread`).
+    """
+    batch = service.synthesize_segments(
+        language=req.language,
+        voice_id=req.voiceId,
+        segments=req.segments,
+        output_dir=req.outputDir,
+        speed=req.speed,
+    )
+    return SynthesizeResponse(
+        segments=batch.segments,
+        engine=batch.engine,
+        fallbackSegments=batch.fallback_segments,
+    )
+
+
+def run() -> None:
+    """Entry point for `python -m app.main` style invocation."""
+    import uvicorn
+
+    uvicorn.run(
+        "app.main:app",
+        host=settings.host,
+        port=settings.port,
+        log_level="info",
+    )
+
+
+if __name__ == "__main__":
+    run()

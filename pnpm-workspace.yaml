@@ -1,0 +1,15 @@
+# pnpm workspace definition for VideoDubber.
+#
+# Only TypeScript/Node packages participate in the pnpm workspace.
+# The Python workers (workers/stt-worker, workers/translation-worker,
+# workers/tts-worker) are NOT pnpm packages — they are managed with
+# their own virtualenvs / requirements.txt and launched via scripts/.
+packages:
+  - 'packages/*'
+  - 'workers/media-worker'
+  - 'apps/desktop'
+allowBuilds:
+  '@parcel/watcher': true
+  esbuild: true
+  lmdb: true
+  msgpackr-extract: true

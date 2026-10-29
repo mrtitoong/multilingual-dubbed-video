@@ -1,0 +1,150 @@
+"""Runtime configuration for the TTS worker.
+
+All configuration is read from environment variables with sensible local-first
+defaults. Nothing here requires Piper or any cloud credentials — the worker
+always has a working fallback engine.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+
+def _env(name: str, default: str | None = None) -> str | None:
+    """Read an env var, treating empty/whitespace-only values as unset."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    value = value.strip()
+    return value if value else default
+
+
+def _default_cache_dir() -> Path:
+    """Default cache directory for synthesized audio.
+
+    Prefers ~/VideoDubber/cache/tts to align with the project's
+    VIDEODUBBER_PROJECTS_DIR convention (~/VideoDubber/projects).
+    """
+    base = _env("VIDEODUBBER_CACHE_DIR")
+    if base:
+        return Path(base).expanduser() / "tts"
+    return Path.home() / "VideoDubber" / "cache" / "tts"
+
+
+def _resolve_concurrency() -> int:
+    """Number of segments to synthesize in parallel.
+
+    Each segment is an independent engine subprocess (Piper) writing a distinct
+    file under a uniquely-keyed cache, so concurrency overlaps the per-segment
+    subprocess wall-clock (the dominant cost on long videos). Defaults to a
+    conservative min(cpu, 4); override with TTS_CONCURRENCY.
+    """
+    raw = _env("TTS_CONCURRENCY")
+    if raw:
+        try:
+            n = int(raw)
+            if n > 0:
+                return n
+        except ValueError:
+            pass
+    return max(1, min(os.cpu_count() or 4, 4))
+
+
+# Default LRU ceiling for the synthesized-audio cache. Every distinct segment of
+# every video ever dubbed leaves a WAV behind (the key includes the segment id),
+# so without a bound this grows monotonically inside the user's home directory —
+# hundreds of MB per feature-length run at 48 kHz. 4 GiB keeps a handful of
+# recent projects hot while staying well inside what a user notices.
+_DEFAULT_CACHE_MAX_BYTES = 4 * 1024 * 1024 * 1024
+
+
+def _resolve_cache_max_bytes() -> int:
+    """Byte ceiling for the TTS audio cache (TTS_CACHE_MAX_BYTES; 0 = unbounded)."""
+    raw = _env("TTS_CACHE_MAX_BYTES")
+    if raw:
+        try:
+            n = int(raw)
+            if n >= 0:
+                return n
+        except ValueError:
+            pass
+    return _DEFAULT_CACHE_MAX_BYTES
+
+
+def _default_piper_voices_dir() -> Path:
+    """Default directory holding installed Piper voice models (*.onnx).
+
+    SHARED CONTRACT with the orchestrator's first-run installer and the desktop
+    shell (sidecar.rs): voices live under <config>/models/piper, where <config>
+    is VIDEODUBBER_CONFIG_DIR or ~/VideoDubber. PIPER_VOICES_DIR overrides.
+    """
+    base = _env("VIDEODUBBER_CONFIG_DIR")
+    root = Path(base).expanduser() if base else Path.home() / "VideoDubber"
+    return root / "models" / "piper"
+
+
+@dataclass(frozen=True)
+class Settings:
+    """Immutable view of the worker's configuration."""
+
+    # Network
+    host: str
+    port: int
+
+    # Piper engine
+    piper_binary_path: str | None
+    piper_voice_model_path: str | None
+    piper_voices_dir: Path
+
+    # System TTS overrides (optional; otherwise discovered on PATH)
+    ffmpeg_path: str | None
+
+    # Caching
+    cache_dir: Path
+    # Byte ceiling for cache_dir; 0 disables eviction.
+    cache_max_bytes: int
+
+    # Audio defaults
+    default_sample_rate: int
+
+    # Synthesis parallelism (segments synthesized concurrently).
+    concurrency: int
+
+    @property
+    def piper_configured(self) -> bool:
+        """True if both the Piper binary path and a voice model are set."""
+        return bool(self.piper_binary_path and self.piper_voice_model_path)
+
+
+def load_settings() -> Settings:
+    """Build a Settings instance from the current environment."""
+    cache_dir = _default_cache_dir()
+    # Ensure the cache directory exists eagerly so engines can rely on it.
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # Non-fatal: caching just becomes a no-op if the dir can't be created.
+        pass
+
+    return Settings(
+        host=_env("TTS_WORKER_HOST", "127.0.0.1") or "127.0.0.1",
+        port=int(_env("TTS_WORKER_PORT", "5103") or "5103"),
+        piper_binary_path=_env("PIPER_BINARY_PATH"),
+        piper_voice_model_path=_env("PIPER_VOICE_MODEL_PATH"),
+        piper_voices_dir=(
+            Path(_env("PIPER_VOICES_DIR") or "").expanduser()
+            if _env("PIPER_VOICES_DIR")
+            else _default_piper_voices_dir()
+        ),
+        ffmpeg_path=_env("FFMPEG_PATH"),
+        cache_dir=cache_dir,
+        cache_max_bytes=_resolve_cache_max_bytes(),
+        default_sample_rate=int(_env("TTS_DEFAULT_SAMPLE_RATE", "22050") or "22050"),
+        concurrency=_resolve_concurrency(),
+    )
+
+
+# Module-level singleton — cheap to construct, read once at import time.
+settings = load_settings()

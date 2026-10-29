@@ -1,0 +1,96 @@
+# ===== Node / pnpm =====
+node_modules/
+.pnpm-store/
+.pnpm-debug.log*
+
+# ===== Build / compile output =====
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# ===== TypeScript / JS tooling caches =====
+.eslintcache
+coverage/
+.vitest/
+
+# Output of `pnpm eval:translation` (the EN<->VI A/B harness).
+eval-translation-output.md
+
+# ===== Angular (apps/desktop) =====
+.angular/
+.angular/cache/
+
+# ===== Rust / Tauri (apps/desktop/src-tauri) =====
+target/
+
+# ===== Bundled sidecar binaries (apps/desktop/src-tauri/binaries) =====
+# Large, platform-specific frozen binaries produced by scripts/package/* and
+# rebuilt fresh in CI per platform. Keep the directory (.gitkeep + README) but
+# never commit the binaries or the build scratch dirs.
+apps/desktop/src-tauri/binaries/*
+!apps/desktop/src-tauri/binaries/.gitkeep
+!apps/desktop/src-tauri/binaries/README.md
+
+# ===== Staged engine-pack worker source (apps/desktop/src-tauri/resources) =====
+# Copied from workers/tts-engine-neural/ by scripts/package/stage-engine-src.sh
+# and bundled as a Tauri resource. Build artifact — never commit.
+apps/desktop/src-tauri/resources/
+
+# ===== Python workers =====
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# ===== Local model & data caches =====
+# Downloaded faster-whisper / Argos / Piper models and other large assets.
+# Root-anchored: a bare "models/" would also swallow SOURCE directories like
+# packages/shared/src/models/ (which it silently did — never repeat that).
+/models/
+.cache/
+*.onnx
+*.bin
+
+# NOTE: VideoDubber project workspaces live OUTSIDE the repo by default
+# (VIDEODUBBER_PROJECTS_DIR, default ~/VideoDubber/projects). If a developer
+# points it at a folder inside the repo, ignore the generated artifacts:
+VideoDubber/
+projects-local/
+
+# ===== Environment / secrets =====
+# Never commit real env files or API keys. .env.example IS committed.
+.env
+.env.*
+!.env.example
+*.local
+
+# ===== Logs =====
+*.log
+logs/
+.dev-logs/
+
+# ===== OS / editor cruft =====
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.shared.json
+*.swp
+*~
+
+# ===== Claude Code =====
+# Commit team-wide .claude/settings.json; keep personal overrides local.
+.claude/settings.local.json
+
+# Apple signing + notarization credentials. Only the .example is committed;
+# the filled-in file holds an app-specific password and must never be staged.
+/scripts/apple-credentials.env

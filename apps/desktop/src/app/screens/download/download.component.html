@@ -1,0 +1,269 @@
+<section class="page stack">
+  <div class="row row-between">
+    <div>
+      <h1>
+        {{ 'source-video.title' | translate }}
+        <span class="badge badge-warning">{{ 'source-video.experimental' | translate }}</span>
+      </h1>
+      <p class="muted">{{ 'source-video.subtitle' | translate }}</p>
+    </div>
+  </div>
+
+  <vd-error-banner [error]="error()" (dismiss)="dismissError()" />
+
+  <!-- Step 1: paste a link -->
+  <div class="card stack">
+    <h2>{{ 'source-video.link-heading' | translate }}</h2>
+    <label class="stack-sm">
+      <span class="label">{{ 'source-video.link-label' | translate }}</span>
+      <input
+        type="text"
+        class="input"
+        [ngModel]="input()"
+        (ngModelChange)="input.set($event)"
+        (keydown.enter)="resolve()"
+        [placeholder]="'source-video.link-placeholder' | translate"
+        [disabled]="downloading()"
+      />
+      <span class="hint muted">{{ 'source-video.link-hint' | translate }}</span>
+      <span class="hint muted">{{ 'source-video.quality-note' | translate }}</span>
+    </label>
+
+    <div class="row">
+      <button
+        type="button"
+        class="btn"
+        (click)="resolve()"
+        [disabled]="resolving() || downloading() || !input().trim()"
+      >
+        {{ (resolving() ? 'source-video.resolving' : 'source-video.resolve') | translate }}
+      </button>
+    </div>
+  </div>
+
+  <!-- Step 2: confirm what was found -->
+  @if (video(); as info) {
+    <div class="card stack">
+      <h2>{{ 'source-video.preview-heading' | translate }}</h2>
+      <div class="preview">
+        @if (info.coverUrl) {
+          <img class="cover" [src]="info.coverUrl" alt="" />
+        }
+        <div class="preview-details stack-sm">
+          <p class="preview-title">{{ info.title }}</p>
+          @if (info.ownerName) {
+            <p class="muted">{{ info.ownerName }}</p>
+          }
+          <p class="muted">{{ formatDuration(info.durationSec) }}</p>
+        </div>
+      </div>
+
+      @if (showPartPicker()) {
+        <label class="stack-sm">
+          <span class="label">{{ 'source-video.part-label' | translate }}</span>
+          <select
+            class="input"
+            [ngModel]="selectedPage()"
+            (ngModelChange)="selectedPage.set(+$event)"
+            [disabled]="downloading()"
+          >
+            @for (part of info.parts; track part.id) {
+              <option [value]="part.page">
+                P{{ part.page }} — {{ part.title }} ({{ formatDuration(part.durationSec) }})
+              </option>
+            }
+          </select>
+        </label>
+      }
+
+      @if (showQualityPicker()) {
+        <label class="stack-sm">
+          <span class="label">{{ 'source-video.quality-label' | translate }}</span>
+          <select
+            class="input"
+            [ngModel]="targetHeight() ?? ''"
+            (ngModelChange)="targetHeight.set($event === '' ? undefined : +$event)"
+            [disabled]="downloading()"
+          >
+            <!-- The whole ladder stays selectable even when this video cannot
+                 serve a rung: it is a standing preference, not a claim about
+                 this video. What it resolves to is stated underneath. -->
+            <option value="">{{ 'source-video.quality-best' | translate }}</option>
+            @for (q of qualityLadder; track q.heightPx) {
+              <option [value]="q.heightPx">
+                {{ qualityLabelFor(q) }}
+              </option>
+            }
+          </select>
+          @if (resolvedQuality(); as picked) {
+            <span class="hint muted">
+              {{
+                (qualityDowngraded()
+                  ? 'source-video.quality-resolved-lower'
+                  : 'source-video.quality-resolved'
+                ) | translate: { quality: picked.label }
+              }}
+            </span>
+          }
+        </label>
+      }
+
+      <div class="row">
+        <button
+          type="button"
+          class="btn btn-primary"
+          (click)="start()"
+          [disabled]="starting() || downloading()"
+        >
+          {{ 'source-video.start' | translate }}
+        </button>
+      </div>
+    </div>
+  }
+
+  <!-- Step 3: progress / result -->
+  @if (progress(); as p) {
+    <div class="card stack">
+      <h2>{{ 'source-video.progress-heading' | translate }}</h2>
+
+      @if (completedPath(); as path) {
+        <p>{{ 'source-video.done' | translate }}</p>
+        <p>
+          <span class="label">{{ 'source-video.saved-to' | translate }}</span>
+          <span class="mono">{{ path }}</span>
+        </p>
+        <div class="row">
+          <button type="button" class="btn btn-primary" (click)="useAsSource()">
+            {{ 'source-video.use-as-source' | translate }}
+          </button>
+          <button type="button" class="btn" (click)="reveal()">
+            {{ 'source-video.reveal' | translate }}
+          </button>
+          <button type="button" class="btn btn-ghost" (click)="reset()">
+            {{ 'source-video.another' | translate }}
+          </button>
+        </div>
+      } @else {
+        <!-- Literal keys per branch, not a built string: the i18n checker can
+             only verify keys it can see. -->
+        <p class="muted">
+          @switch (p.phase) {
+            @case ('video') {
+              {{ 'source-video.phase-video' | translate }}
+            }
+            @case ('audio') {
+              {{ 'source-video.phase-audio' | translate }}
+            }
+            @case ('merging') {
+              {{ 'source-video.phase-merging' | translate }}
+            }
+          }
+        </p>
+        <!-- A null percent means the server sent no length: show an
+             indeterminate bar rather than a number that would be a guess. -->
+        @if (p.percent !== null) {
+          <div
+            class="progress"
+            role="progressbar"
+            [attr.aria-label]="'source-video.progress-aria' | translate"
+            [attr.aria-valuenow]="p.percent"
+          >
+            <span [style.width.%]="p.percent"></span>
+          </div>
+          <p class="muted">{{ p.percent }}%</p>
+        } @else {
+          <div
+            class="progress indeterminate"
+            role="progressbar"
+            [attr.aria-label]="'source-video.progress-aria' | translate"
+          >
+            <span></span>
+          </div>
+        }
+      }
+    </div>
+  }
+
+  <!-- Optional credentials, one card per provider that takes one. Collapsed
+       by default: most people never need it, and it is the one control here
+       that carries real risk. -->
+  @if (sessionProviders().length > 0) {
+    <details class="card stack" [open]="sessionOpen()">
+      <summary class="session-summary">{{ 'source-video.session.heading' | translate }}</summary>
+      <p class="muted">{{ 'source-video.session.intro' | translate }}</p>
+      <p class="hint">{{ 'source-video.session.warning' | translate }}</p>
+
+      @for (p of sessionProviders(); track p.id) {
+        <div class="cred-row stack-sm">
+          <div class="cred-head">
+            <span class="cred-name">{{ providerLabel(p.id) }}</span>
+            @if (sessionFor(p.id); as sess) {
+              @if (sess.configured) {
+                <span class="badge badge-completed">
+                  {{
+                    sess.fromEnv
+                      ? ('source-video.session.from-env' | translate)
+                      : ('source-video.session.set' | translate: { masked: sess.masked ?? '' })
+                  }}
+                </span>
+              } @else {
+                <span class="badge">{{ 'source-video.session.not-configured' | translate }}</span>
+              }
+            }
+          </div>
+          <div class="cred-controls">
+            <input
+              type="password"
+              class="grow"
+              [attr.aria-label]="'source-video.session.heading' | translate"
+              [placeholder]="'source-video.session.placeholder' | translate"
+              [ngModel]="sessionInput()"
+              (ngModelChange)="sessionInput.set($event)"
+              [name]="'session-' + p.id"
+              autocomplete="off"
+            />
+            <button
+              type="button"
+              class="btn btn-sm"
+              (click)="saveSession(p.id)"
+              [disabled]="sessionBusy() !== null || sessionInput().trim().length === 0"
+            >
+              {{ 'source-video.session.save' | translate }}
+            </button>
+            <button
+              type="button"
+              class="btn btn-sm"
+              (click)="checkSession(p.id)"
+              [disabled]="sessionBusy() !== null || !(sessionFor(p.id)?.configured ?? false)"
+            >
+              {{ sessionBusy() === p.id ? '…' : ('source-video.session.check' | translate) }}
+            </button>
+            @if (sessionFor(p.id)?.configured && !sessionFor(p.id)?.fromEnv) {
+              <button
+                type="button"
+                class="btn btn-ghost btn-sm"
+                (click)="clearSession(p.id)"
+                [disabled]="sessionBusy() !== null"
+              >
+                {{ 'source-video.session.remove' | translate }}
+              </button>
+            }
+          </div>
+          <!-- An expired credential does not error, it silently drops back to
+               the anonymous ceiling, so the check has to say so out loud. -->
+          @if (sessionCheck(); as check) {
+            <p class="hint" [class.test-ok]="check.valid" [class.test-fail]="!check.valid">
+              {{
+                check.valid
+                  ? ('source-video.session.valid' | translate: { name: check.uname ?? '' })
+                  : ('source-video.session.invalid' | translate)
+              }}
+            </p>
+          }
+        </div>
+      }
+    </details>
+  }
+
+  <p class="muted fineprint">{{ 'source-video.respect-notice' | translate }}</p>
+</section>

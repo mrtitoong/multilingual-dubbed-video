@@ -1,0 +1,104 @@
+#requires -Version 5.1
+<#
+.SYNOPSIS
+  Local-first release helper (Windows): ensure the DRAFT GitHub release exists
+  and upload locally-built installers to it, WITHOUT running CI.
+
+.DESCRIPTION
+  Windows counterpart of scripts/package/release-upload.sh. Pairs with a local
+  build so cutting a release doesn't burn (10x-billed) macOS Actions minutes:
+    pnpm install --frozen-lockfile
+    pwsh scripts/package/build-sidecars.ps1
+    pnpm app:build
+    pwsh scripts/package/release-upload.ps1 -Upload `
+      apps/desktop/src-tauri/target/release/bundle/nsis/*-setup.exe `
+      apps/desktop/src-tauri/target/release/bundle/msi/*_en-US.msi
+
+  Auth: the GitHub OAuth token from `git credential` (no `gh` CLI), or $env:GH_TOKEN.
+  Repo/tag default to this project; override with $env:GH_REPO / $env:RELEASE_TAG.
+
+.PARAMETER Ensure
+  Only ensure the draft exists and print its id (no upload).
+
+.PARAMETER Upload
+  One or more files (globs allowed) to upload, replacing same-named assets.
+#>
+[CmdletBinding()]
+param(
+  [switch]$Ensure,
+  [Parameter(ValueFromRemainingArguments = $true)] [string[]]$Upload
+)
+$ErrorActionPreference = 'Stop'
+
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$RepoRoot  = Resolve-Path (Join-Path $ScriptDir "..\..")
+$Conf      = Join-Path $RepoRoot "apps\desktop\src-tauri\tauri.conf.json"
+$BodyHeader = Join-Path $ScriptDir "release-body-header.md"
+
+# The default used to be a literal 'v0.1.0', which three runbooks then repeated as
+# an instruction ("upload to the v0.1.0 draft") - so a bare invocation at version
+# 0.9.0 published this release's installers into the FIRST release. Default to the
+# version actually being built instead, which is what docs/RELEASING.md already
+# claims the behaviour is.
+$TauriConf  = Get-Content -Raw $Conf | ConvertFrom-Json
+$AppVersion = $TauriConf.version
+$Tag  = if ($env:RELEASE_TAG) { $env:RELEASE_TAG } else { "v$AppVersion" }
+if (-not $Tag -or $Tag -eq 'v') { throw "Could not read the version from $Conf; set `$env:RELEASE_TAG." }
+$Repo = if ($env:GH_REPO)     { $env:GH_REPO }     else { 'mrtitoong/multilingual-dubbed-video' }
+
+function Get-GhToken {
+  if ($env:GH_TOKEN) { return $env:GH_TOKEN }
+  $out = "protocol=https`nhost=github.com`n`n" | git credential fill 2>$null
+  $line = ($out | Select-String '^password=' | Select-Object -First 1)
+  if ($line) { return ($line.Line -replace '^password=', '') }
+  return $null
+}
+
+$Token = Get-GhToken
+if (-not $Token) { throw "No GitHub token (set `$env:GH_TOKEN or log in so 'git credential' has one)." }
+$Headers = @{ Authorization = "Bearer $Token"; Accept = 'application/vnd.github+json' }
+
+function Ensure-Release {
+  $rels = Invoke-RestMethod -Headers $Headers "https://api.github.com/repos/$Repo/releases?per_page=100"
+  $r = $rels | Where-Object { $_.tag_name -eq $Tag } | Select-Object -First 1
+  if ($r) { return $r.id }
+  # Seed the body with the download table (see release-body-header.md) so a
+  # non-technical user can tell the installer from the updater payload. The
+  # maintainer then appends the changelog under it; nothing here overwrites an
+  # existing release's body.
+  $header = ''
+  if (Test-Path $BodyHeader) {
+    $minMacos = $TauriConf.bundle.macOS.minimumSystemVersion
+    if (-not $minMacos) { $minMacos = '14.0' }
+    $header = (Get-Content -Raw $BodyHeader) -replace '(?s)<!--.*?-->\r?\n?', ''
+    $header = $header.Replace('{{VERSION}}', $AppVersion).Replace('{{MIN_MACOS}}', $minMacos)
+  }
+  $body = @{ tag_name = $Tag; name = "VideoDubber $Tag"; body = $header; draft = $true; prerelease = $false } | ConvertTo-Json
+  $created = Invoke-RestMethod -Method Post -Headers $Headers -ContentType 'application/json' -Body $body `
+    "https://api.github.com/repos/$Repo/releases"
+  Write-Host "created draft release $Tag (id $($created.id))"
+  return $created.id
+}
+
+function Upload-Asset($rid, $file) {
+  $name = Split-Path $file -Leaf
+  $assets = Invoke-RestMethod -Headers $Headers "https://api.github.com/repos/$Repo/releases/$rid/assets?per_page=100"
+  $existing = $assets | Where-Object { $_.name -eq $name } | Select-Object -First 1
+  if ($existing) {
+    Invoke-RestMethod -Method Delete -Headers $Headers "https://api.github.com/repos/$Repo/releases/assets/$($existing.id)" | Out-Null
+  }
+  $url = "https://uploads.github.com/repos/$Repo/releases/$rid/assets?name=$name"
+  Invoke-RestMethod -Method Post -Headers $Headers -ContentType 'application/octet-stream' -InFile $file $url | Out-Null
+  $mb = [math]::Round((Get-Item $file).Length / 1MB, 1)
+  Write-Host "  uploaded $name (${mb} MB)"
+}
+
+$rid = Ensure-Release
+Write-Host "release $Tag -> id $rid"
+if ($Ensure -and (-not $Upload)) { Write-Output $rid; return }
+
+$files = @()
+foreach ($p in $Upload) { $files += @(Get-ChildItem -Path $p -File -ErrorAction SilentlyContinue) }
+if (-not $files) { Write-Warning 'No files matched to upload.'; return }
+foreach ($f in $files) { Upload-Asset $rid $f.FullName }
+Write-Host "done. Review/publish the draft: https://github.com/$Repo/releases"
