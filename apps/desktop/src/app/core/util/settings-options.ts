@@ -113,6 +113,7 @@ export const SETTING_AFFECTS_STEP: Partial<Record<keyof ProjectSettings, Pipelin
   ttsGainDb: 'audio-mix',
   renderQuality: 'render',
   subtitleExportMode: 'render',
+  sourceSubtitleMask: 'render',
 };
 
 /** The user-facing re-dub stages, earliest → latest (subset of pipeline steps). */

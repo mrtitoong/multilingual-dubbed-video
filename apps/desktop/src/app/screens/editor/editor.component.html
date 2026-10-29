@@ -272,6 +272,14 @@
               }
             </select>
           </label>
+          <div class="setting-row">
+            <span class="label">{{ 'mask.heading' | translate }}</span>
+            <vd-source-subtitle-mask
+              [value]="s.sourceSubtitleMask"
+              [disabled]="redubbing()"
+              (valueChange)="onSettingChange('sourceSubtitleMask', $event)"
+            />
+          </div>
           <label class="setting-row">
             <span class="label">{{ 'editor.render-quality' | translate }}</span>
             <select

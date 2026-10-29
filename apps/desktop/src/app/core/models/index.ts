@@ -24,6 +24,9 @@ export type {
   PipelineStepId,
   // Settings / style
   SubtitleStyle,
+  SourceSubtitleMask,
+  SourceSubtitleMaskMode,
+  NormalizedRect,
   ProjectSettings,
   // Engine packs
   EnginePackInfo,

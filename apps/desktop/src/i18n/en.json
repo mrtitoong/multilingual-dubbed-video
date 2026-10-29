@@ -777,5 +777,24 @@
     "report-issue": "Report a problem on GitHub",
     "privacy": "Your home folder is replaced with ~ and any API keys are removed before copying. Nothing leaves this machine until you paste it somewhere yourself.",
     "copy-manual": "Copying to the clipboard was blocked. Select this text and copy it manually:"
+  },
+  "mask": {
+    "heading": "Subtitles already in the video",
+    "intro": "Source videos often have subtitles burned into the picture. Blur or cover them so the new subtitles don't sit on top of the old ones. Turning this on re-encodes the video, so the export takes longer.",
+    "mode-label": "Original subtitles",
+    "modes": {
+      "off": "Keep as is",
+      "blur": "Blur",
+      "box": "Blur + dark band"
+    },
+    "region-label": "Subtitle area",
+    "regions": {
+      "auto": "Detect automatically (recommended)",
+      "manual": "Set manually"
+    },
+    "top": "Starts at (% of height, from the top)",
+    "height": "Band height (% of height)",
+    "hint-auto": "The app finds the original subtitles from the parts where someone speaks. If it picks the wrong area, switch to Set manually. Burned-in new subtitles are placed inside this band.",
+    "hint-manual": "The band spans the full width. For subtitles at about three quarters of the height, start at 70% with a height of 7%."
   }
 }

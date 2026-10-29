@@ -128,6 +128,15 @@
       </fieldset>
 
       <fieldset>
+        <legend>{{ 'mask.heading' | translate }}</legend>
+        <p class="hint">{{ 'mask.intro' | translate }}</p>
+        <vd-source-subtitle-mask
+          [value]="settings().sourceSubtitleMask"
+          (valueChange)="patchSettings('sourceSubtitleMask', $event)"
+        />
+      </fieldset>
+
+      <fieldset>
         <legend>{{ 'wizard.original-audio' | translate }}</legend>
         <div class="radio-list" role="radiogroup" [attr.aria-label]="'wizard.original-audio-aria' | translate">
           <label class="radio-row">

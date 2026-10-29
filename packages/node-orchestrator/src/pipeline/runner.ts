@@ -51,6 +51,7 @@ import { looksUntranslated } from '../providers/translation/llmTranslationProvid
 import { reviewTranslations } from '../providers/translation/refinement.js';
 import { isTranslationRefiner } from '../providers/types.js';
 import { applyCueOverrides, writeCueOverrides } from '../workspace/subtitleTiming.js';
+import { describeSourceMask, sourceSubtitleMaskInput } from './sourceSubtitleMask.js';
 import {
   estimateGroupDriftMs,
   maxGroupDriftMs,
@@ -1541,6 +1542,7 @@ export class PipelineRunner {
           : undefined;
 
     this.deps.logger.info(`Rendering final video (subtitle mode: ${mode})...`);
+    const sourceSubtitleMask = await sourceSubtitleMaskInput(project.settings, paths.sourceJson);
     const result = await this.deps.media.renderFinalVideo(
       {
         inputVideoPath: project.inputVideoPath,
@@ -1551,9 +1553,12 @@ export class PipelineRunner {
         burnSubtitleStyle: project.settings.burnSubtitleStyle,
         copyVideoStream: mode !== 'burned-in',
         ...(project.settings.renderQuality ? { renderQuality: project.settings.renderQuality } : {}),
+        ...(sourceSubtitleMask ? { sourceSubtitleMask } : {}),
       },
       signal,
     );
+    const maskLine = sourceSubtitleMask ? describeSourceMask(result, sourceSubtitleMask.mode) : undefined;
+    if (maskLine) this.deps.logger.info(maskLine);
     this.deps.logger.info(
       `Render complete: ${result.outputPath} (${Math.round(result.durationMs / 1000)}s, ${result.sidecarSubtitlePaths.length} sidecar subtitle file(s)).`,
     );

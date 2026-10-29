@@ -55,6 +55,7 @@ import { PipelineRunner, type RunnerDeps } from './pipeline/runner.js';
 import type { ProjectStore } from './workspace/projectStore.js';
 import { segmentIdToIndex, type WorkspacePaths } from './workspace/paths.js';
 import { applyCueOverrides, clearCueOverridesFor, readCueOverrides } from './workspace/subtitleTiming.js';
+import { sourceSubtitleMaskInput } from './pipeline/sourceSubtitleMask.js';
 
 /** Injected dependencies for the orchestrator (all mockable in tests). */
 export interface OrchestratorDeps {
@@ -136,6 +137,7 @@ const EDITABLE_SETTING_KEYS = [
   'roomTone',
   'renderQuality',
   'subtitleExportMode',
+  'sourceSubtitleMask',
   'forcedAlignment',
   'diarize',
 ] as const satisfies readonly (keyof ProjectSettings)[];
@@ -710,6 +712,7 @@ export class LocalJobOrchestrator implements JobOrchestrator {
           ? paths.translatedSrt
           : undefined;
 
+    const sourceSubtitleMask = await sourceSubtitleMaskInput(project.settings, paths.sourceJson);
     return this.deps.media.renderFinalVideo({
       inputVideoPath: project.inputVideoPath,
       audioPath: paths.finalMixWav,
@@ -718,6 +721,8 @@ export class LocalJobOrchestrator implements JobOrchestrator {
       subtitlePath,
       burnSubtitleStyle: project.settings.burnSubtitleStyle,
       copyVideoStream: mode !== 'burned-in',
+      ...(project.settings.renderQuality ? { renderQuality: project.settings.renderQuality } : {}),
+      ...(sourceSubtitleMask ? { sourceSubtitleMask } : {}),
     });
   }
 

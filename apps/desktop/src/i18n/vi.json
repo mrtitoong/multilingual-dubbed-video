@@ -777,5 +777,24 @@
     "report-issue": "Báo lỗi trên GitHub",
     "privacy": "Đường dẫn thư mục cá nhân được thay bằng ~ và mọi khoá API đều bị xoá trước khi sao chép. Không có gì rời khỏi máy này cho tới khi chính bạn dán nó đi đâu đó.",
     "copy-manual": "Trình duyệt chặn thao tác sao chép. Hãy bôi đen đoạn dưới đây và tự sao chép:"
+  },
+  "mask": {
+    "heading": "Phụ đề gốc trong video",
+    "intro": "Video gốc thường có sẵn phụ đề in cứng trong hình. Làm mờ hoặc che chúng để phụ đề tiếng Việt không chồng lên phụ đề cũ. Bật tính năng này sẽ mã hoá lại video nên xuất lâu hơn.",
+    "mode-label": "Xử lý phụ đề gốc",
+    "modes": {
+      "off": "Giữ nguyên",
+      "blur": "Làm mờ",
+      "box": "Làm mờ + dải tối"
+    },
+    "region-label": "Vùng phụ đề",
+    "regions": {
+      "auto": "Tự dò (khuyên dùng)",
+      "manual": "Tự chọn"
+    },
+    "top": "Bắt đầu từ (% chiều cao, tính từ trên)",
+    "height": "Độ cao dải (% chiều cao)",
+    "hint-auto": "Ứng dụng dò vị trí phụ đề gốc từ những đoạn có lời thoại. Nếu dò sai, hãy chuyển sang Tự chọn. Phụ đề tiếng Việt in cứng sẽ được đặt vào đúng dải này.",
+    "hint-manual": "Dải phủ hết chiều ngang khung hình. Ví dụ phụ đề nằm ở khoảng 3/4 chiều cao thì bắt đầu từ 70%, cao 7%."
   }
 }

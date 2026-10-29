@@ -153,13 +153,47 @@ export function buildSubtitlesFilter(
   subtitlePath: string,
   style?: SubtitleStyle,
   platform: NodeJS.Platform = process.platform,
+  /** Placement/size overrides in ASS script units (see marginVForBand, portraitFontSize). */
+  overrides: { marginV?: number; fontSize?: number } = {},
 ): string {
   const escaped = escapeSubtitlePathForFilter(subtitlePath, platform);
   let filter = `subtitles=${escaped}`;
-  if (style) {
+  const { marginV, fontSize } = overrides;
+  const fields = [
+    ...(style ? [buildBurnSubtitlesStyle(style)] : []),
+    ...(fontSize !== undefined ? [`FontSize=${Math.max(1, Math.round(fontSize))}`] : []),
+    ...(marginV !== undefined ? [`MarginV=${Math.max(0, Math.round(marginV))}`] : []),
+  ];
+  if (fields.length > 0) {
     // force_style is itself passed as a single value; wrap in single quotes so
     // its internal commas are treated as style fields, not filter separators.
-    filter += `:force_style='${buildBurnSubtitlesStyle(style)}'`;
+    filter += `:force_style='${fields.join(',')}'`;
   }
   return filter;
+}
+
+/** libass's script height for an SRT input (its default PlayResY). */
+const SRT_PLAY_RES_Y = 288;
+
+/**
+ * Font size (ASS units) for a PORTRAIT frame, or undefined for landscape.
+ *
+ * libass scales an SRT's default 18-unit font by the frame HEIGHT, which suits
+ * 16:9 (~3.5% of the width) but on a 720x1280 short drew ~80 px glyphs across a
+ * 720 px frame: a two-line cue re-wrapped to four lines and buried the picture.
+ * Portrait frames get a font sized to the WIDTH instead (~5% of it). Pure.
+ */
+export function portraitFontSize(width: number, height: number): number | undefined {
+  if (!(width > 0 && height > 0) || width >= height) return undefined;
+  return Math.max(6, Math.round((0.05 * width * SRT_PLAY_RES_Y) / height));
+}
+
+/**
+ * Bottom margin that seats a bottom-aligned subtitle inside a band given as
+ * fractions of the frame height — used to put the dub's subtitles where the
+ * source's hidden hardsubs were, instead of on a fresh strip of picture. Pure.
+ */
+export function marginVForBand(bandY: number, bandHeight: number): number {
+  const below = Math.max(0, 1 - (bandY + bandHeight));
+  return Math.round((below + bandHeight * 0.15) * SRT_PLAY_RES_Y);
 }

@@ -48,6 +48,7 @@ import type {
 import type { PiperVoiceInfo, ProviderInfo, ProvidersResponse, WhisperModelInfo } from '../../core/models/setup';
 import type { EditorSegmentVm, SegmentWithAlignment } from '../../core/models/view-models';
 import { TranslatePipe } from '../../core/i18n';
+import { SourceSubtitleMaskComponent } from '../../shared/source-subtitle-mask/source-subtitle-mask.component';
 
 /** Soft cap for "long subtitle" warning (≈ 2 lines × 42 chars). */
 const LONG_SUBTITLE_CHAR_LIMIT = 84;
@@ -119,7 +120,7 @@ const CONTEXT_BLIND_TRANSLATION_PROVIDERS: readonly string[] = ['argos', 'libret
   selector: 'vd-editor',
   standalone: true,
   changeDetection: ChangeDetectionStrategy.OnPush,
-  imports: [FormsModule, RouterLink, ErrorBannerComponent, TranslatePipe],
+  imports: [FormsModule, RouterLink, ErrorBannerComponent, TranslatePipe, SourceSubtitleMaskComponent],
   templateUrl: './editor.component.html',
   styleUrl: './editor.component.scss',
 })

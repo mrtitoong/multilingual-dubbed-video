@@ -17,6 +17,10 @@
  *     - re-encode the video with -vf subtitles=<escaped>:force_style=...
  *       (burning requires re-encode), aac audio.
  *
+ *   Any mode, with a source-subtitle mask (see hardsubs.ts):
+ *     - the mask filter runs first (and forces a re-encode); burned-in
+ *       subtitles are then drawn on the masked picture, seated in the band.
+ *
  * Arg-builders are pure (testable); renderFinalVideo spawns + probes duration.
  */
 
@@ -39,8 +43,9 @@ import {
   runFfmpeg,
   type RunOptions,
 } from './exec.js';
-import { probeDurationMs } from './probe.js';
-import { buildSubtitlesFilter } from './subtitles.js';
+import { probe, probeDurationMs } from './probe.js';
+import { buildSourceMaskFilter, resolveSourceSubtitleRegion } from './hardsubs.js';
+import { buildSubtitlesFilter, marginVForBand, portraitFontSize } from './subtitles.js';
 
 /**
  * Choose the H.264 video encoder for a re-encode (burned-in subtitles).
@@ -84,6 +89,10 @@ export interface RenderArgsContext {
   videoCodec?: string;
   /** Encoder-specific args (preset/crf for x264, q/cq for HW). */
   videoCodecArgs?: string[];
+  /** Filter chain hiding the source's hardsubs (forces a re-encode). */
+  sourceMaskFilter?: string;
+  /** Burned-in subtitle placement/size overrides (ASS units). */
+  subtitleOverrides?: { marginV?: number; fontSize?: number };
 }
 
 const AUDIO_ARGS = ['-c:a', 'aac', '-b:a', '192k'] as const;
@@ -103,8 +112,10 @@ export function buildRenderArgs(ctx: RenderArgsContext): string[] {
     subtitlePath,
     burnSubtitleStyle,
     platform,
+    sourceMaskFilter,
   } = ctx;
-  const copyVideo = ctx.copyVideoStream !== false; // default true except burned-in
+  // A mask edits the picture, so it can never ride on a copied stream.
+  const copyVideo = ctx.copyVideoStream !== false && !sourceMaskFilter; // default true except burned-in
   // Encoder for re-encodes: default to software x264 unless the caller resolved
   // a hardware encoder (renderQuality "fast").
   const videoCodec = ctx.videoCodec ?? 'libx264';
@@ -116,7 +127,8 @@ export function buildRenderArgs(ctx: RenderArgsContext): string[] {
         throw missingSubtitle('burned-in');
       }
       // Burning requires a video re-encode; -c:v copy is impossible here.
-      const filter = buildSubtitlesFilter(subtitlePath, burnSubtitleStyle, platform);
+      const subs = buildSubtitlesFilter(subtitlePath, burnSubtitleStyle, platform, ctx.subtitleOverrides);
+      const filter = sourceMaskFilter ? `${sourceMaskFilter},${subs}` : subs;
       return [
         '-y',
         '-i',
@@ -156,8 +168,7 @@ export function buildRenderArgs(ctx: RenderArgsContext): string[] {
         '1:a:0',
         '-map',
         '2:0',
-        '-c:v',
-        copyVideo ? 'copy' : 'libx264',
+        ...videoArgs(copyVideo, sourceMaskFilter, videoCodec, videoCodecArgs),
         ...AUDIO_ARGS,
         '-c:s',
         'mov_text',
@@ -180,13 +191,19 @@ export function buildRenderArgs(ctx: RenderArgsContext): string[] {
         '0:v:0',
         '-map',
         '1:a:0',
-        '-c:v',
-        copyVideo ? 'copy' : 'libx264',
+        ...videoArgs(copyVideo, sourceMaskFilter, videoCodec, videoCodecArgs),
         ...AUDIO_ARGS,
         outputPath,
       ];
     }
   }
+}
+
+/** Video-stream args for the non-burning modes: copy, or (masked) filter + encode. */
+function videoArgs(copy: boolean, maskFilter: string | undefined, codec: string, codecArgs: string[]): string[] {
+  if (copy) return ['-c:v', 'copy'];
+  if (maskFilter) return ['-vf', maskFilter, '-c:v', codec, ...codecArgs];
+  return ['-c:v', 'libx264'];
 }
 
 function missingSubtitle(mode: SubtitleExportMode): AppErrorException {
@@ -248,11 +265,30 @@ export async function renderFinalVideo(
     assertInputReadable(input.subtitlePath);
   }
 
-  // Resolve the re-encode codec only when we actually re-encode (burned-in).
-  // For "fast" we pick a hardware encoder if this ffmpeg build has one.
+  // Hide the source's own hardsubs: resolve (detect) the band once, up front.
+  const mask = input.sourceSubtitleMask;
+  const maskResolved =
+    mask && mask.mode !== 'off' ? await resolveSourceSubtitleRegion(input.inputVideoPath, mask, runOpts) : undefined;
+  const sourceMaskFilter =
+    mask && mask.mode !== 'off' && maskResolved ? buildSourceMaskFilter(mask.mode, maskResolved.region) : undefined;
+  // Seat burned-in subtitles in the masked band (bottom-aligned styles only —
+  // an explicit top/center placement is the user's choice and is kept).
+  const subtitleMarginV =
+    maskResolved && (input.burnSubtitleStyle?.alignment ?? 'bottom') === 'bottom'
+      ? marginVForBand(maskResolved.region.y, maskResolved.region.height)
+      : undefined;
+  // Portrait sources get a width-relative font unless the user styled it.
+  let subtitleFontSize: number | undefined;
+  if (input.subtitleExportMode === 'burned-in' && !input.burnSubtitleStyle) {
+    const v = (await probe(input.inputVideoPath, runOpts).catch(() => undefined))?.videoStreams[0];
+    subtitleFontSize = v ? portraitFontSize(v.width, v.height) : undefined;
+  }
+
+  // Resolve the re-encode codec only when we actually re-encode (burned-in or
+  // masked). For "fast" we pick a hardware encoder if this ffmpeg build has one.
   let videoCodec: string | undefined;
   let videoCodecArgs: string[] | undefined;
-  if (input.subtitleExportMode === 'burned-in') {
+  if (input.subtitleExportMode === 'burned-in' || sourceMaskFilter) {
     const encoders = await listFfmpegEncoders(runOpts);
     const sel = selectVideoCodec(input.renderQuality, process.platform, encoders);
     videoCodec = sel.codec;
@@ -274,9 +310,14 @@ export async function renderFinalVideo(
       burnSubtitleStyle: input.burnSubtitleStyle,
       // burned-in must re-encode; everything else may copy unless caller forbids.
       copyVideoStream:
-        input.subtitleExportMode === 'burned-in' ? false : input.copyVideoStream,
+        input.subtitleExportMode === 'burned-in' || sourceMaskFilter ? false : input.copyVideoStream,
       ...(videoCodec ? { videoCodec } : {}),
       ...(videoCodecArgs ? { videoCodecArgs } : {}),
+      ...(sourceMaskFilter ? { sourceMaskFilter } : {}),
+      subtitleOverrides: {
+        ...(subtitleMarginV !== undefined ? { marginV: subtitleMarginV } : {}),
+        ...(subtitleFontSize !== undefined ? { fontSize: subtitleFontSize } : {}),
+      },
     });
     return runFfmpeg(args, runOpts);
   });
@@ -296,5 +337,6 @@ export async function renderFinalVideo(
     outputPath: input.outputPath,
     durationMs,
     sidecarSubtitlePaths,
+    ...(maskResolved ? { sourceSubtitleMask: maskResolved } : {}),
   };
 }

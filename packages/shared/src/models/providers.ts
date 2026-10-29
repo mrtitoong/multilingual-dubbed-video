@@ -14,6 +14,8 @@ import type {
   RenderQuality,
   SubtitleExportMode,
   SubtitleStyle,
+  NormalizedRect,
+  SourceSubtitleMask,
   TranscriptSegment,
   TtsSegment,
 } from './domain.js';
@@ -45,6 +47,17 @@ export interface RenderFinalVideoInput {
    * (VideoToolbox/NVENC) when available.
    */
   renderQuality?: RenderQuality;
+  /**
+   * Hide the source's burned-in subtitles before anything else is drawn. Any
+   * mode but `off` forces a video re-encode. Without a `region`, the renderer
+   * detects the band from frames sampled at `speechTimesMs` (when the source
+   * speaks, so its hardsubs are on screen) against `quietTimesMs` (when it
+   * doesn't), falling back to a default bottom band.
+   */
+  sourceSubtitleMask?: SourceSubtitleMask & {
+    speechTimesMs?: number[];
+    quietTimesMs?: number[];
+  };
 }
 
 /** Result of rendering the final dubbed video. */
@@ -55,6 +68,8 @@ export interface RenderFinalVideoResult {
   durationMs: number;
   /** Absolute paths to any sidecar subtitle files written. */
   sidecarSubtitlePaths: string[];
+  /** The region the source-subtitle mask covered, and whether it was detected. */
+  sourceSubtitleMask?: { region: NormalizedRect; detected: boolean };
 }
 
 /** FFmpeg-backed media operations. */

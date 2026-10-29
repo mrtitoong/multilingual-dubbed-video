@@ -87,6 +87,32 @@ export interface SubtitleStyle {
   alignment: 'bottom' | 'top' | 'center';
 }
 
+/**
+ * How to hide subtitles already burned into the SOURCE picture (hardsubs) so
+ * the dub's own subtitles don't sit on top of the original language's:
+ *   off  — leave the picture untouched (default; the video stream may be copied)
+ *   blur — heavy Gaussian blur over the region (keeps the scene's colours)
+ *   box  — an opaque dark band over the region (fully hides the text)
+ * True removal (inpainting the pixels behind the text) needs a video ML model
+ * and is not offered offline.
+ */
+export type SourceSubtitleMaskMode = 'off' | 'blur' | 'box';
+
+/** A rectangle as FRACTIONS (0..1) of the frame, so it fits any resolution. */
+export interface NormalizedRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Project setting for {@link SourceSubtitleMaskMode}. */
+export interface SourceSubtitleMask {
+  mode: SourceSubtitleMaskMode;
+  /** The region to hide. Absent = detect it from the video at render time. */
+  region?: NormalizedRect;
+}
+
 /** All user-configurable settings for a dubbing project. */
 export interface ProjectSettings {
   /** Source (spoken) language of the input video. */
@@ -183,6 +209,8 @@ export interface ProjectSettings {
   speakerVoices?: SpeakerVoiceAssignment[];
   /** Optional style for burned-in subtitles. */
   burnSubtitleStyle?: SubtitleStyle;
+  /** Blur or cover the source video's own burned-in subtitles (default off). */
+  sourceSubtitleMask?: SourceSubtitleMask;
 }
 
 /** Lifecycle status of a project. */
